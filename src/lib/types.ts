@@ -185,8 +185,9 @@ export interface ProjectOverride {
 /**
  * Full Idle config, as loaded from `~/.idle/config.toml`.
  *
- * Matches PRD §6.2. Unknown top-level keys are preserved on round-trip by
- * `saveConfig` so users can add their own TOML sections without losing them.
+ * Matches PRD §6.2. Only the keys declared here are part of the typed
+ * contract — unknown keys may or may not survive a `saveConfig` round-trip,
+ * depending on how Core chooses to implement it in T-004.
  */
 export interface IdleConfig {
   thresholds: ThresholdsConfig;
