@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+// Entry point for the `idle` CLI.
+//
+// Registers the tsx ESM loader so `.ts` imports resolve at runtime, then
+// dispatches to src/cli.ts. There is no build step — TypeScript sources
+// ship and are executed via tsx (see CLAUDE.md "Shipping model").
+//
+// Every bootstrap step is wrapped so a broken install surfaces as a terse
+// Idle-voice stderr line, not a raw Node stack trace.
+
+let tsxApi;
+try {
+  tsxApi = await import('tsx/esm/api');
+} catch {
+  process.stderr.write('idle: tsx not found — reinstall or npm install\n');
+  process.exit(1);
+}
+
+const unregister = tsxApi.register();
+try {
+  await import('../src/cli.js');
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`idle: startup failed — ${msg}\n`);
+  process.exit(1);
+} finally {
+  unregister();
+}
