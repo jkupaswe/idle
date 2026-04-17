@@ -92,7 +92,13 @@ async function sendMac(input: NotifyInput): Promise<void> {
 }
 
 async function sendLinux(input: NotifyInput): Promise<void> {
-  const args = [input.title, input.body];
+  // The `--` separator tells notify-send to stop parsing CLI flags; every
+  // argument after it is a positional value. Without this, a title or body
+  // that happens to start with `-` (the body is model-generated text) would
+  // be interpreted as an option — e.g. `-h` prints help instead of
+  // delivering the notification. `execFile` already protects against shell
+  // injection; `--` closes the argv-level equivalent.
+  const args = ['--', input.title, input.body];
   await execFileP('notify-send', args);
 }
 

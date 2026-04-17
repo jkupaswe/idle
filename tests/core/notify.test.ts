@@ -126,7 +126,7 @@ describe('notify (linux)', () => {
     process.env.IDLE_NOTIFY_PLATFORM = 'linux';
   });
 
-  test('invokes notify-send with title and body as separate args', async () => {
+  test('invokes notify-send with `--` separator and title/body as separate args', async () => {
     // First call: `which notify-send` succeeds. Second: notify-send itself.
     execFileMock
       .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
@@ -138,7 +138,7 @@ describe('notify (linux)', () => {
     expect(execFileMock.mock.calls[0]).toEqual(['which', ['notify-send']]);
     expect(execFileMock.mock.calls[1]).toEqual([
       'notify-send',
-      ['Idle', 'take a walk'],
+      ['--', 'Idle', 'take a walk'],
     ]);
   });
 
@@ -149,7 +149,38 @@ describe('notify (linux)', () => {
 
     await notify({ title: 'Idle', body: 'say "hi"; $rm -rf /' });
     const [, args] = execFileMock.mock.calls[1]!;
-    expect(args).toEqual(['Idle', 'say "hi"; $rm -rf /']);
+    expect(args).toEqual(['--', 'Idle', 'say "hi"; $rm -rf /']);
+  });
+
+  test('leading-dash body is not interpreted as a notify-send flag', async () => {
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+    // Model output that starts with `-` or `--` — without the separator,
+    // notify-send would treat this as an option.
+    await notify({
+      title: 'Idle',
+      body: '--help --urgency=critical # ignored after --',
+    });
+    const [, args] = execFileMock.mock.calls[1]!;
+    expect(args).toEqual([
+      '--',
+      'Idle',
+      '--help --urgency=critical # ignored after --',
+    ]);
+    // Separator comes before any user content.
+    expect(args.indexOf('--')).toBe(0);
+  });
+
+  test('leading-dash title is also guarded by the separator', async () => {
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+    await notify({ title: '-i critical', body: 'body' });
+    const [, args] = execFileMock.mock.calls[1]!;
+    expect(args).toEqual(['--', '-i critical', 'body']);
   });
 
   test('falls back to stderr when notify-send is missing', async () => {
