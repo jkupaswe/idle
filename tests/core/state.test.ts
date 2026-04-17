@@ -19,9 +19,14 @@ import {
   DEFAULT_LOCK_TIMEOUT,
   incrementToolCounter,
   readState,
+  registerSession,
+  removeSession,
   takeSessionSnapshot,
-  updateState,
 } from '../../src/core/state.js';
+// _updateState is the module-private mutation primitive. Tests that need
+// to exercise its behaviors (throwing mutators, concurrent serialization,
+// lock timeouts) import from the internal module; production code cannot.
+import { _updateState } from '../../src/core/state.internal.js';
 import type {
   SessionEntry,
   SessionId,
@@ -192,13 +197,13 @@ describe('readState', () => {
 });
 
 // ---------------------------------------------------------------------------
-// updateState — Mutator<T>, timeouts as ok:false, not throws
+// _updateState — Mutator<T>, timeouts as ok:false, not throws
 // ---------------------------------------------------------------------------
 
-describe('updateState', () => {
+describe('_updateState (internal primitive)', () => {
   test('applies mutator and persists atomically; returns mutator value', async () => {
     const p = statePath();
-    const result = await updateState(
+    const result = await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({ project_path: '/tmp/a' });
         return 'done' as const;
@@ -214,7 +219,7 @@ describe('updateState', () => {
 
   test('leaves no .tmp artifact or stale lock on success', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry();
       },
@@ -228,7 +233,7 @@ describe('updateState', () => {
   test('releases the lock even if the mutator throws', async () => {
     const p = statePath();
     await expect(
-      updateState(
+      _updateState(
         () => {
           throw new Error('mutator boom');
         },
@@ -236,7 +241,7 @@ describe('updateState', () => {
       ),
     ).rejects.toThrow('mutator boom');
 
-    const follow = await updateState(
+    const follow = await _updateState(
       (s) => {
         s.sessions[SESSION_B] = baseEntry();
       },
@@ -251,7 +256,7 @@ describe('updateState', () => {
     const N = 20;
     await Promise.all(
       Array.from({ length: N }, (_, i) =>
-        updateState(
+        _updateState(
           (s) => {
             const prev = s.sessions[SESSION_A]?.total_tool_calls ?? 0;
             s.sessions[SESSION_A] = baseEntry({
@@ -266,9 +271,14 @@ describe('updateState', () => {
     expect(readState(p).state.sessions[SESSION_A]?.total_tool_calls).toBe(N);
   });
 
-  test('serializes concurrent cross-process calls', async () => {
+  test('serializes concurrent cross-process calls via the public incrementToolCounter', async () => {
     const p = statePath();
     const N = 8;
+    // Parent registers the session; workers only increment (which is the
+    // only state-mutation path the public API exposes).
+    const reg = await registerSession(SESSION_A, baseEntry(), { path: p });
+    expect(reg.ok).toBe(true);
+
     await Promise.all(
       Array.from({ length: N }, (_, i) =>
         execFileP(
@@ -287,7 +297,7 @@ describe('updateState', () => {
     writeFileSync(p, JSON.stringify({ sessions: {} }));
     const release = await lockfile.lock(p, { retries: 0, stale: 30_000 });
     try {
-      const hurried = await updateState(() => 'never', {
+      const hurried = await _updateState(() => 'never', {
         path: p,
         timeoutMs: ms(200),
       });
@@ -306,7 +316,7 @@ describe('updateState', () => {
 describe('takeSessionSnapshot', () => {
   test('returns ok:true + frozen snapshot for an existing session', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({ project_path: '/here' });
       },
@@ -327,13 +337,71 @@ describe('takeSessionSnapshot', () => {
 });
 
 // ---------------------------------------------------------------------------
+// registerSession + removeSession
+// ---------------------------------------------------------------------------
+
+describe('registerSession', () => {
+  test('inserts a new session and returns a frozen snapshot', async () => {
+    const p = statePath();
+    const r = await registerSession(
+      SESSION_A,
+      baseEntry({ project_path: '/here' }),
+      { path: p },
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('unreachable');
+    expect(r.entry.project_path).toBe('/here');
+    expect(Object.isFrozen(r.entry)).toBe(true);
+    expect(readState(p).state.sessions[SESSION_A]).toBeDefined();
+  });
+
+  test('reason=already_exists when the session id is already present', async () => {
+    const p = statePath();
+    await registerSession(SESSION_A, baseEntry(), { path: p });
+    const second = await registerSession(SESSION_A, baseEntry(), { path: p });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toBe('already_exists');
+  });
+
+  test('copies caller-supplied arrays so later mutation does not leak in', async () => {
+    const p = statePath();
+    const mutableCheckins: string[] = ['2026-04-17T00:00:00.000Z'];
+    const input = baseEntry({ checkins: mutableCheckins });
+    await registerSession(SESSION_A, input, { path: p });
+    mutableCheckins.push('2026-04-17T00:05:00.000Z');
+    const stored = readState(p).state.sessions[SESSION_A];
+    expect(stored?.checkins).toHaveLength(1);
+  });
+});
+
+describe('removeSession', () => {
+  test('removes an existing session and returns the frozen entry', async () => {
+    const p = statePath();
+    await registerSession(SESSION_A, baseEntry(), { path: p });
+    const r = await removeSession(SESSION_A, { path: p });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('unreachable');
+    expect(r.removed).not.toBeNull();
+    if (r.removed) expect(Object.isFrozen(r.removed)).toBe(true);
+    expect(readState(p).state.sessions[SESSION_A]).toBeUndefined();
+  });
+
+  test('idempotent: removing an absent session returns removed=null', async () => {
+    const r = await removeSession(SESSION_A, { path: statePath() });
+    expect(r.ok).toBe(true);
+    if (!r.ok) throw new Error('unreachable');
+    expect(r.removed).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // consumePendingCheckin
 // ---------------------------------------------------------------------------
 
 describe('consumePendingCheckin', () => {
   test('clears flag, resets counters, appends checkin; returns pre-reset snapshot', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({
           pending_checkin: true,
@@ -366,7 +434,7 @@ describe('consumePendingCheckin', () => {
 
   test('reason=not_pending when no threshold has tripped', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry();
       },
@@ -379,7 +447,7 @@ describe('consumePendingCheckin', () => {
 
   test('reason=disabled short-circuits even if pending', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({
           disabled: true,
@@ -417,7 +485,7 @@ describe('consumePendingCheckin', () => {
 describe('incrementToolCounter', () => {
   test('bumps counters, records last tool, truncates summary to 200', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry();
       },
@@ -445,7 +513,7 @@ describe('incrementToolCounter', () => {
     const p = statePath();
     const LIMIT = 3;
     const small: ThresholdsConfig = { time_minutes: 0, tool_calls: LIMIT };
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry();
       },
@@ -469,7 +537,7 @@ describe('incrementToolCounter', () => {
   test('time threshold trips when started_at is old enough', async () => {
     const p = statePath();
     const longAgo = new Date(Date.now() - 60 * 60_000).toISOString();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({ started_at: longAgo });
       },
@@ -488,7 +556,7 @@ describe('incrementToolCounter', () => {
 
   test('thresholds set to 0 disable that check (PRD §6.2)', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry();
       },
@@ -507,7 +575,7 @@ describe('incrementToolCounter', () => {
 
   test('reason=disabled short-circuits (no state mutation)', async () => {
     const p = statePath();
-    await updateState(
+    await _updateState(
       (s) => {
         s.sessions[SESSION_A] = baseEntry({
           disabled: true,
