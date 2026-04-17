@@ -489,6 +489,16 @@ Implementation sketch:
 - `package.json` bin + files sanity pass once T-013 + T-017 land: either ship `dist/` and point `bin/idle` at `dist/cli.js`, or keep the tarball source-only and point `bin/idle` at `src/cli.ts` via `npx tsx`. PRD §8 suggests the latter for hooks; the same pattern is viable for the CLI entrypoint.
 - Re-run `npm pack --dry-run` after T-017 to verify.
 
+### F-003: verify CI container runs tests as non-root (Architect / CI)
+
+**Raised by:** post-round-5 verification pass on PR #4.
+
+**What's wrong:** The permission-error tests in `tests/core/settings.test.ts` self-skip when `process.getuid() === 0` — chmod 0o000 doesn't simulate EACCES for root, so the tests would emit a false pass if they ran. Local dev (uid 501) runs them for real.
+
+**Needs:** confirm the CI workflow spawns tests under a non-root uid before v1 ship. If CI runs in a Docker image as root, either (a) run the test step under a non-root user (`USER node` or equivalent), or (b) add a workflow step that asserts `id -u != 0` before `npm test`. Otherwise the permission_denied paths are unverified on merge.
+
+---
+
 ### F-002: share `writeAllSync` across state.internal.ts and settings.ts (Core)
 
 **Raised by:** gpt-review-4 / D5 on PR #4 (T-006).

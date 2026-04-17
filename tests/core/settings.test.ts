@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import lockfile from 'proper-lockfile';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
@@ -606,6 +607,53 @@ describe('concurrent writers (settings-file lock)', () => {
         isIdleOwnedCommand(h.command),
       );
       expect(idleHooks, `event=${hook.event}`).toHaveLength(1);
+    }
+  });
+
+  test("install returns ok:false reason=timeout when an external lock is held past the budget", async () => {
+    // Pre-seed settings.json so proper-lockfile has a real path to lock.
+    writeFileSync(settingsPath(), JSON.stringify({ hooks: {} }));
+
+    // Acquire the lock externally and hold it for the test duration.
+    // realpath: false matches how installHooks itself locks.
+    const externalRelease = await lockfile.lock(settingsPath(), {
+      realpath: false,
+      retries: 0,
+    });
+
+    try {
+      const result = await installHooks({
+        settingsPath: settingsPath(),
+        hooksDir: hooksDir(),
+        lockTimeoutMs: 300,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.reason).toBe('timeout');
+        expect(result.detail).toMatch(/lock/i);
+        expect(result.detail).toMatch(/300ms/);
+      }
+    } finally {
+      await externalRelease();
+    }
+  });
+
+  test("uninstall returns ok:false reason=timeout when an external lock is held", async () => {
+    writeFileSync(settingsPath(), JSON.stringify({ hooks: {} }));
+    const externalRelease = await lockfile.lock(settingsPath(), {
+      realpath: false,
+      retries: 0,
+    });
+
+    try {
+      const result = await uninstallHooks({
+        settingsPath: settingsPath(),
+        lockTimeoutMs: 300,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe('timeout');
+    } finally {
+      await externalRelease();
     }
   });
 

@@ -121,6 +121,12 @@ export interface InstallOptions {
   hooksDir?: string;
   /** Full path to settings.json. Defaults to `claudeSettingsPath()`. */
   settingsPath?: string;
+  /**
+   * Budget for acquiring the settings-file lock, in milliseconds. Defaults
+   * to 10s. Mostly useful for tests that want to assert the timeout path
+   * without holding an external lock for the full default budget.
+   */
+  lockTimeoutMs?: number;
 }
 
 /**
@@ -191,6 +197,7 @@ export async function installHooks(
 ): Promise<InstallResult> {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
   const hooksDir = options.hooksDir ?? defaultHooksDir();
+  const lockTimeoutMs = options.lockTimeoutMs ?? SETTINGS_LOCK_TIMEOUT_MS;
 
   if (!existsSync(dirname(settingsPath))) {
     return {
@@ -201,7 +208,7 @@ export async function installHooks(
     };
   }
 
-  const lockResult = await acquireSettingsLock(settingsPath);
+  const lockResult = await acquireSettingsLock(settingsPath, lockTimeoutMs);
   if (!lockResult.ok) {
     if (isPermissionDenied(lockResult.err)) {
       return classifyIoError(lockResult.err, settingsPath);
@@ -209,7 +216,7 @@ export async function installHooks(
     return {
       ok: false,
       reason: 'timeout',
-      detail: `Could not acquire settings lock within ${SETTINGS_LOCK_TIMEOUT_MS}ms: ${settingsPath}`,
+      detail: `Could not acquire settings lock within ${lockTimeoutMs}ms: ${settingsPath}`,
       settingsPath,
     };
   }
@@ -265,9 +272,10 @@ export async function installHooks(
  * "restore exact prior state" requirement).
  */
 export async function uninstallHooks(
-  options: Pick<InstallOptions, 'settingsPath'> = {},
+  options: Pick<InstallOptions, 'settingsPath' | 'lockTimeoutMs'> = {},
 ): Promise<UninstallResult> {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
+  const lockTimeoutMs = options.lockTimeoutMs ?? SETTINGS_LOCK_TIMEOUT_MS;
 
   // Missing file is a pure no-op; no lock needed, no file manufactured.
   if (!existsSync(settingsPath)) {
@@ -280,7 +288,7 @@ export async function uninstallHooks(
     };
   }
 
-  const lockResult = await acquireSettingsLock(settingsPath);
+  const lockResult = await acquireSettingsLock(settingsPath, lockTimeoutMs);
   if (!lockResult.ok) {
     if (isPermissionDenied(lockResult.err)) {
       return classifyIoError(lockResult.err, settingsPath);
@@ -288,7 +296,7 @@ export async function uninstallHooks(
     return {
       ok: false,
       reason: 'timeout',
-      detail: `Could not acquire settings lock within ${SETTINGS_LOCK_TIMEOUT_MS}ms: ${settingsPath}`,
+      detail: `Could not acquire settings lock within ${lockTimeoutMs}ms: ${settingsPath}`,
       settingsPath,
     };
   }
@@ -592,7 +600,10 @@ function isPermissionDenied(err: unknown): err is NodeJS.ErrnoException {
  * the latter would otherwise retry the mkdir for the full budget with
  * zero chance of success.
  */
-async function acquireSettingsLock(settingsPath: string): Promise<
+async function acquireSettingsLock(
+  settingsPath: string,
+  timeoutMs: number,
+): Promise<
   | { readonly ok: true; readonly release: () => Promise<void> }
   | { readonly ok: false; readonly err: unknown }
 > {
@@ -605,10 +616,7 @@ async function acquireSettingsLock(settingsPath: string): Promise<
     return { ok: false, err };
   }
 
-  const retries = Math.max(
-    1,
-    Math.floor(SETTINGS_LOCK_TIMEOUT_MS / 100),
-  );
+  const retries = Math.max(1, Math.floor(timeoutMs / 100));
   try {
     const release = await lockfile.lock(settingsPath, {
       realpath: false,
@@ -625,6 +633,7 @@ async function acquireSettingsLock(settingsPath: string): Promise<
   } catch (err) {
     log('warn', 'settings: lock acquisition failed', {
       settingsPath,
+      timeoutMs,
       error: errMessage(err),
     });
     return { ok: false, err };
