@@ -39,7 +39,7 @@ import lockfile from 'proper-lockfile';
 import { log } from '../lib/log.js';
 import { idleStatePath } from '../lib/paths.js';
 import { nowIso, timestampSuffix } from '../lib/time.js';
-import { ms } from '../lib/types.js';
+import { isValidSessionEntry, ms } from '../lib/types.js';
 import type {
   Milliseconds,
   SessionEntry,
@@ -58,8 +58,18 @@ export const DEFAULT_LOCK_TIMEOUT: Milliseconds = ms(5_000);
 /**
  * Outcome of `readState()`. Always carries a `Readonly<SessionState>` —
  * callers can continue regardless of which arm fires. The discriminator
- * tells them whether the underlying file was present, missing, or
- * recovered from corruption.
+ * tells them which recovery path fired:
+ *
+ * - `fresh` — file parsed cleanly, every entry valid.
+ * - `empty` — file missing (not an error).
+ * - `recovered` — top-level JSON/schema failure; whole file backed up,
+ *   callers get an empty state.
+ * - `partial` — file parsed, but one or more entries failed
+ *   `isValidSessionEntry`. Dropped entries are written to a
+ *   `state.json.corrupt-<suffix>-entries` sidecar; the state returned
+ *   contains only the valid entries so helpers like
+ *   `consumePendingCheckin` don't crash on `entry.checkins is not
+ *   iterable`.
  */
 export type ReadStateResult =
   | { readonly kind: 'fresh'; readonly state: Readonly<SessionState> }
@@ -68,6 +78,12 @@ export type ReadStateResult =
       readonly kind: 'recovered';
       readonly state: Readonly<SessionState>;
       readonly corruptBackupPath: string;
+    }
+  | {
+      readonly kind: 'partial';
+      readonly state: Readonly<SessionState>;
+      readonly droppedEntries: number;
+      readonly backupPath: string;
     };
 
 /** Options accepted by `updateState` and the named mutation helpers. */
@@ -160,7 +176,7 @@ export function readState(path: string = idleStatePath()): ReadStateResult {
     };
   }
 
-  if (!isPlainSessionState(parsed)) {
+  if (!hasPlainSessionsMap(parsed)) {
     const backupPath = backupCorruptFile(path, new Error('state schema mismatch'));
     return {
       kind: 'recovered',
@@ -169,7 +185,17 @@ export function readState(path: string = idleStatePath()): ReadStateResult {
     };
   }
 
-  return { kind: 'fresh', state: freezeState(parsed) };
+  const { valid, dropped } = partitionEntries(parsed.sessions);
+  if (dropped.count > 0) {
+    const backupPath = backupDroppedEntries(path, dropped.entries);
+    return {
+      kind: 'partial',
+      state: freezeState({ sessions: valid }),
+      droppedEntries: dropped.count,
+      backupPath,
+    };
+  }
+  return { kind: 'fresh', state: freezeState({ sessions: valid }) };
 }
 
 // ---------------------------------------------------------------------------
@@ -367,8 +393,10 @@ async function acquireLock(
 
 /**
  * Read state for mutation. Corrupt or missing files yield an empty state
- * (corrupt files are backed up first). Always returns a mutable object —
- * the caller is about to hand it to a mutator.
+ * (corrupt files are backed up first). Per-entry invalid sessions are
+ * stripped and backed up to a `-entries` sidecar so the mutator operates
+ * on a clean shape. Always returns a mutable object — the caller is
+ * about to hand it to a mutator.
  */
 function readMutableState(path: string): SessionState {
   let raw: string;
@@ -392,7 +420,16 @@ function readMutableState(path: string): SessionState {
     return emptyState();
   }
 
-  return isPlainSessionState(parsed) ? parsed : emptyState();
+  if (!hasPlainSessionsMap(parsed)) {
+    backupCorruptFile(path, new Error('state schema mismatch'));
+    return emptyState();
+  }
+
+  const { valid, dropped } = partitionEntries(parsed.sessions);
+  if (dropped.count > 0) {
+    backupDroppedEntries(path, dropped.entries);
+  }
+  return { sessions: valid };
 }
 
 /**
@@ -461,7 +498,13 @@ function backupCorruptFile(path: string, cause: unknown): string {
   return backupPath;
 }
 
-function isPlainSessionState(value: unknown): value is SessionState {
+/**
+ * Weaker check than isValidSessionEntry — just asserts the top-level shape
+ * `{ sessions: object }`. Entries inside are validated separately.
+ */
+function hasPlainSessionsMap(
+  value: unknown,
+): value is { sessions: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
@@ -472,6 +515,59 @@ function isPlainSessionState(value: unknown): value is SessionState {
     sessions !== null &&
     !Array.isArray(sessions)
   );
+}
+
+interface PartitionResult {
+  readonly valid: Record<string, SessionEntry>;
+  readonly dropped: {
+    readonly count: number;
+    readonly entries: Record<string, unknown>;
+  };
+}
+
+/**
+ * Walk every session id → raw value pair. Keep only those that pass
+ * `isValidSessionEntry`; collect the rest for backup. Log each drop so
+ * operators notice entries silently disappearing.
+ */
+function partitionEntries(input: Record<string, unknown>): PartitionResult {
+  const valid: Record<string, SessionEntry> = {};
+  const dropped: Record<string, unknown> = {};
+  let count = 0;
+  for (const [id, raw] of Object.entries(input)) {
+    if (isValidSessionEntry(raw)) {
+      valid[id] = raw;
+    } else {
+      dropped[id] = raw;
+      count += 1;
+      log('warn', 'state: dropping malformed session entry', {
+        session_id: id,
+        reason: 'schema_mismatch',
+      });
+    }
+  }
+  return { valid, dropped: { count, entries: dropped } };
+}
+
+/**
+ * Persist dropped entries to a sidecar file so the operator can inspect
+ * what was lost. Never throws — a backup failure must not cascade into a
+ * hook abort.
+ */
+function backupDroppedEntries(
+  statePath: string,
+  dropped: Record<string, unknown>,
+): string {
+  const backupPath = `${statePath}.corrupt-${timestampSuffix()}-entries`;
+  try {
+    atomicWriteFile(backupPath, JSON.stringify(dropped, null, 2) + '\n');
+  } catch (err) {
+    log('error', 'state: could not back up dropped entries', {
+      backupPath,
+      error: errMessage(err),
+    });
+  }
+  return backupPath;
 }
 
 function isNotFound(err: unknown): err is NodeJS.ErrnoException {

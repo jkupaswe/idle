@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -158,7 +159,35 @@ describe('readState', () => {
 
   test('read errors never throw — fallback to empty', () => {
     const r = readState(statePath());
-    expect(['empty', 'fresh', 'recovered']).toContain(r.kind);
+    expect(['empty', 'fresh', 'recovered', 'partial']).toContain(r.kind);
+  });
+
+  test('kind=partial — one good entry, one malformed; only the good one survives', () => {
+    const p = statePath();
+    const good = baseEntry({ project_path: '/valid' });
+    const bad = { started_at: 'ok', project_path: 'ok' }; // missing required fields
+    writeFileSync(
+      p,
+      JSON.stringify({
+        sessions: {
+          [SESSION_A]: good,
+          [SESSION_B]: bad,
+        },
+      }),
+    );
+
+    const r = readState(p);
+    expect(r.kind).toBe('partial');
+    if (r.kind !== 'partial') throw new Error('unreachable');
+    expect(r.droppedEntries).toBe(1);
+    expect(r.state.sessions[SESSION_A]?.project_path).toBe('/valid');
+    expect(r.state.sessions[SESSION_B]).toBeUndefined();
+    expect(r.backupPath).toMatch(/state\.json\.corrupt-.*-entries$/);
+    expect(existsSync(r.backupPath)).toBe(true);
+    const backup = JSON.parse(
+      readFileSync(r.backupPath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(backup[SESSION_B]).toEqual(bad);
   });
 });
 
@@ -363,6 +392,22 @@ describe('consumePendingCheckin', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('disabled');
   });
+
+  test('malformed entry is silently dropped → reason=not_found', async () => {
+    const p = statePath();
+    writeFileSync(
+      p,
+      JSON.stringify({
+        sessions: { [SESSION_A]: { started_at: 'only' } },
+      }),
+    );
+    const r = await consumePendingCheckin(SESSION_A, { path: p });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('not_found');
+    // The malformed entry is gone after the operation.
+    const after = readState(p);
+    expect(after.state.sessions[SESSION_A]).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -491,5 +536,24 @@ describe('incrementToolCounter', () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('not_found');
+  });
+
+  test('malformed entry is silently dropped → reason=not_found', async () => {
+    const p = statePath();
+    writeFileSync(
+      p,
+      JSON.stringify({
+        sessions: { [SESSION_A]: { broken: true } },
+      }),
+    );
+    const r = await incrementToolCounter(
+      SESSION_A,
+      { name: 'Tool', summary: '' },
+      THRESHOLDS,
+      { path: p },
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe('not_found');
+    expect(readState(p).state.sessions[SESSION_A]).toBeUndefined();
   });
 });

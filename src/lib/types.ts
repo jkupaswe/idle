@@ -294,6 +294,92 @@ export interface SessionState {
   sessions: Record<string, SessionEntry>;
 }
 
+/**
+ * Type predicate that validates a raw `unknown` against the `SessionEntry`
+ * schema. Enforces the required fields and checks the types of optional
+ * fields when they are present. Used by `readState` and the state-mutation
+ * path to drop malformed entries on disk — if the shape doesn't match,
+ * helpers like `consumePendingCheckin` would otherwise crash on
+ * `entry.checkins is not iterable`.
+ */
+export function isValidSessionEntry(x: unknown): x is SessionEntry {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false;
+
+  if (!('started_at' in x) || typeof x.started_at !== 'string') return false;
+  if (!('project_path' in x) || typeof x.project_path !== 'string') return false;
+  if (
+    !('tool_calls_since_checkin' in x) ||
+    typeof x.tool_calls_since_checkin !== 'number' ||
+    !Number.isFinite(x.tool_calls_since_checkin)
+  ) {
+    return false;
+  }
+  if (
+    !('total_tool_calls' in x) ||
+    typeof x.total_tool_calls !== 'number' ||
+    !Number.isFinite(x.total_tool_calls)
+  ) {
+    return false;
+  }
+  if (
+    !('last_checkin_at' in x) ||
+    !(x.last_checkin_at === null || typeof x.last_checkin_at === 'string')
+  ) {
+    return false;
+  }
+  if (
+    !('checkins' in x) ||
+    !Array.isArray(x.checkins) ||
+    !x.checkins.every((c) => typeof c === 'string')
+  ) {
+    return false;
+  }
+
+  // Optional fields: if present, must be the right type (not null, not wrong type).
+  if ('disabled' in x && x.disabled !== undefined && typeof x.disabled !== 'boolean') {
+    return false;
+  }
+  if (
+    'pending_checkin' in x &&
+    x.pending_checkin !== undefined &&
+    typeof x.pending_checkin !== 'boolean'
+  ) {
+    return false;
+  }
+  if (
+    'last_tool_name' in x &&
+    x.last_tool_name !== undefined &&
+    typeof x.last_tool_name !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    'last_tool_summary' in x &&
+    x.last_tool_summary !== undefined &&
+    typeof x.last_tool_summary !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    'subagent_tool_calls_since_checkin' in x &&
+    x.subagent_tool_calls_since_checkin !== undefined &&
+    (typeof x.subagent_tool_calls_since_checkin !== 'number' ||
+      !Number.isFinite(x.subagent_tool_calls_since_checkin))
+  ) {
+    return false;
+  }
+  if (
+    'total_subagent_tool_calls' in x &&
+    x.total_subagent_tool_calls !== undefined &&
+    (typeof x.total_subagent_tool_calls !== 'number' ||
+      !Number.isFinite(x.total_subagent_tool_calls))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Prompt template input
 // ---------------------------------------------------------------------------
