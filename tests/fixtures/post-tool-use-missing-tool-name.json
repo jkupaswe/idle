@@ -1,0 +1,7 @@
+{
+  "session_id": "sess_abc123",
+  "transcript_path": "/Users/dev/.claude/projects/example/transcript.jsonl",
+  "cwd": "/Users/dev/projects/example",
+  "hook_event_name": "PostToolUse",
+  "tool_input": { "command": "noop" }
+}
