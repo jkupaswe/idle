@@ -37,6 +37,9 @@ import type {
   ThresholdsConfig,
 } from '../lib/types.js';
 
+import { ms } from '../lib/types.js';
+import type { Milliseconds } from '../lib/types.js';
+
 import {
   _updateState,
   backupCorruptFile,
@@ -49,12 +52,15 @@ import {
   partitionEntries,
   truncate,
 } from './state.internal.js';
-import type { UpdateStateOptions } from './state.internal.js';
-import { ms } from '../lib/types.js';
-import type { Milliseconds } from '../lib/types.js';
 
-export { DEFAULT_LOCK_TIMEOUT } from './state.internal.js';
-export type { UpdateStateOptions } from './state.internal.js';
+// ---------------------------------------------------------------------------
+// Public constants and options — canonical in this file. `state.internal.ts`
+// intentionally mirrors the 5s default and accepts a structurally-equivalent
+// options shape so consumers never have two import paths for the same value.
+// ---------------------------------------------------------------------------
+
+/** Default lock-acquisition budget for state mutations. 5s. */
+export const DEFAULT_LOCK_TIMEOUT: Milliseconds = ms(5_000);
 
 /**
  * Default wall-clock budget for the PostToolUse hot path. The wall-clock
@@ -63,6 +69,14 @@ export type { UpdateStateOptions } from './state.internal.js';
  * filesystem I/O stalls past it, the call returns a timeout result.
  */
 export const INCREMENT_TOOL_COUNTER_TIMEOUT: Milliseconds = ms(200);
+
+/** Options accepted by every named mutation helper. */
+export interface UpdateStateOptions {
+  /** Override `~/.idle/state.json`. Used by tests. */
+  readonly path?: string;
+  /** Maximum wait, in milliseconds. Defaults to `DEFAULT_LOCK_TIMEOUT`. */
+  readonly timeoutMs?: Milliseconds;
+}
 
 // ---------------------------------------------------------------------------
 // Public result unions

@@ -36,10 +36,16 @@ import type {
 } from '../lib/types.js';
 
 // ---------------------------------------------------------------------------
-// Shared types (re-exported from state.ts for the public surface)
+// Internal plumbing. Nothing in this file is part of the public surface —
+// `state.ts` owns the public constants and option shapes; this file owns
+// `_updateState`, the mutator type, and the low-level fs helpers. Avoid
+// exporting anything `state.ts` also exports or you re-create the dual-
+// import-path ambiguity called out during review.
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_LOCK_TIMEOUT: Milliseconds = ms(5_000);
+/** Internal default when the caller doesn't supply a timeout. Mirrored by
+ *  `state.ts`'s exported `DEFAULT_LOCK_TIMEOUT` — kept in sync by eye. */
+const INTERNAL_DEFAULT_LOCK_TIMEOUT: Milliseconds = ms(5_000);
 
 // ---------------------------------------------------------------------------
 // Deadline — wall-clock timeout enforcement across every phase of a state op.
@@ -72,11 +78,15 @@ export function remainingMs(deadline: Deadline): Milliseconds {
   return ms(Math.max(0, deadline.expiresAt - Date.now()));
 }
 
-/** Options accepted by `_updateState` and every named mutation helper. */
-export interface UpdateStateOptions {
-  /** Override `~/.idle/state.json`. Used by tests. */
+/**
+ * Shape of the options argument `_updateState` accepts. Intentionally
+ * INTERNAL — `state.ts` owns the public `UpdateStateOptions` type with
+ * the same shape, and callers pass values of the public type. Structural
+ * typing keeps them interchangeable without creating a second import
+ * path for consumers.
+ */
+interface InternalStateOpOptions {
   readonly path?: string;
-  /** Maximum wait for the file lock. Defaults to 5s. */
   readonly timeoutMs?: Milliseconds;
 }
 
@@ -106,10 +116,10 @@ export type UpdateStateResult<T> =
  */
 export async function _updateState<T>(
   mutator: Mutator<T>,
-  options: UpdateStateOptions = {},
+  options: InternalStateOpOptions = {},
 ): Promise<UpdateStateResult<T>> {
   const path = options.path ?? idleStatePath();
-  const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT;
+  const timeoutMs = options.timeoutMs ?? INTERNAL_DEFAULT_LOCK_TIMEOUT;
   const deadline = makeDeadline(timeoutMs);
 
   if (isExpired(deadline)) return TIMEOUT;
