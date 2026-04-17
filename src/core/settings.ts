@@ -461,12 +461,35 @@ function atomicWriteJson(path: string, value: unknown): void {
   atomicWriteFile(path, JSON.stringify(value, null, 2) + '\n');
 }
 
+/**
+ * Always resolve to `<pkg-root>/src/hooks/`, whether this module is
+ * running from `src/core/settings.ts` (dev / tsx) or from
+ * `dist/core/settings.js` (built). The hook commands we install use
+ * `npx tsx <path>/foo.ts`, so they must always point at the .ts
+ * sources — dist/ contains .js files and the install would emit dead
+ * paths.
+ *
+ * The function is exported (via {@link resolveHooksDirFromModule}) so
+ * tests can verify both layouts end up at the same directory without
+ * reaching into import.meta.url.
+ */
 function defaultHooksDir(): string {
-  // This file lives at <pkg>/src/core/settings.ts (or dist/core/settings.js
-  // after build). Either way, `../hooks` relative to it points at the
-  // hook scripts directory.
-  const here = fileURLToPath(import.meta.url);
-  return resolve(dirname(here), '..', 'hooks');
+  return resolveHooksDirFromModule(fileURLToPath(import.meta.url));
+}
+
+/**
+ * Testable core of {@link defaultHooksDir}: given the absolute path of
+ * this module's on-disk location (either `src/core/settings.ts` or
+ * `dist/core/settings.js`), walk up to the package root and descend
+ * into `src/hooks/`.
+ *
+ * Both layouts sit two directories below the package root
+ * (`<pkg>/{src|dist}/core/<file>`), so going up two and into
+ * `src/hooks/` works for either.
+ */
+export function resolveHooksDirFromModule(moduleFile: string): string {
+  const pkgRoot = resolve(dirname(moduleFile), '..', '..');
+  return resolve(pkgRoot, 'src', 'hooks');
 }
 
 function isNotFound(err: unknown): err is NodeJS.ErrnoException {

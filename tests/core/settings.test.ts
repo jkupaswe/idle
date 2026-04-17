@@ -18,6 +18,7 @@ import {
   IDLE_TAG,
   installHooks,
   isIdleOwnedCommand,
+  resolveHooksDirFromModule,
   uninstallHooks,
 } from '../../src/core/settings.js';
 
@@ -398,6 +399,21 @@ describe('uninstall: tightened ownership detection', () => {
       };
     }>(settingsPath());
     expect(after.hooks.SessionStart[0]!.hooks[0]!.command).toBe(userHook);
+  });
+});
+
+describe('resolveHooksDirFromModule', () => {
+  test('resolves to <pkg>/src/hooks whether called from src/ or dist/', () => {
+    const fromSrc = resolveHooksDirFromModule('/pkg/src/core/settings.ts');
+    const fromDist = resolveHooksDirFromModule('/pkg/dist/core/settings.js');
+    expect(fromSrc).toBe('/pkg/src/hooks');
+    expect(fromDist).toBe('/pkg/src/hooks');
+  });
+
+  test('never points at dist/hooks (files there are .js, not .ts)', () => {
+    const resolved = resolveHooksDirFromModule('/opt/idle/dist/core/settings.js');
+    expect(resolved).not.toMatch(/dist\/hooks$/);
+    expect(resolved).toMatch(/src\/hooks$/);
   });
 });
 
