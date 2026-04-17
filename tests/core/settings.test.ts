@@ -55,7 +55,10 @@ function readJson<T = unknown>(p: string): T {
 describe('installHooks', () => {
   test('creates settings.json with four Idle hooks when file is missing', () => {
     const result = install();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
     expect(result.backupPath).toBeNull();
+    expect(result.installedEvents).toEqual([...IDLE_EVENTS]);
 
     const settings = readJson<{
       hooks: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>>;
@@ -67,6 +70,20 @@ describe('installHooks', () => {
       expect(idle, `event=${event}`).toBeDefined();
       expect(idle!.command).toMatch(/^npx tsx /);
     }
+  });
+
+  test('returns ok:false reason=claude_not_installed when ~/.claude is missing', () => {
+    const missingDir = join(tmp, 'does-not-exist', 'settings.json');
+    const r = installHooks({
+      settingsPath: missingDir,
+      hooksDir: hooksDir(),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe('claude_not_installed');
+      expect(r.detail).toMatch(/Claude Code home directory/);
+    }
+    expect(existsSync(missingDir)).toBe(false);
   });
 
   test('preserves user hooks and unrelated top-level keys', () => {
@@ -104,6 +121,8 @@ describe('installHooks', () => {
     writeFileSync(settingsPath(), JSON.stringify(original));
 
     const result = install();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
     expect(result.backupPath).toMatch(/\.idle-backup-/);
     expect(existsSync(result.backupPath!)).toBe(true);
     const backup = JSON.parse(readFileSync(result.backupPath!, 'utf8'));
@@ -120,9 +139,14 @@ describe('installHooks', () => {
     expect(twice).toEqual(once);
   });
 
-  test('rejects a malformed JSON settings file', () => {
+  test('returns ok:false reason=malformed_settings on invalid JSON', () => {
     writeFileSync(settingsPath(), '{not valid json');
-    expect(() => install()).toThrow(/Failed to parse Claude Code settings/);
+    const r = install();
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toBe('malformed_settings');
+      expect(r.detail).toMatch(/parse/i);
+    }
   });
 
   test('leaves no .tmp artifact after write', () => {
@@ -156,7 +180,9 @@ describe('uninstallHooks', () => {
 
     install();
     const result = uninstall();
-    expect(result.removed).toBe(IDLE_EVENTS.length);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.removedEvents).toEqual([...IDLE_EVENTS]);
 
     const after = readJson<unknown>(settingsPath());
     expect(after).toEqual(original);
@@ -165,7 +191,10 @@ describe('uninstallHooks', () => {
   test('removes only Idle hooks and leaves empty groups collapsed', () => {
     install();
     const result = uninstall();
-    expect(result.removed).toBe(IDLE_EVENTS.length);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.removedEvents).toEqual([...IDLE_EVENTS]);
+    expect(result.fileExisted).toBe(true);
     const after = readJson<{ hooks?: unknown }>(settingsPath());
     // No prior user hooks → the `hooks` key should be gone entirely.
     expect(after.hooks).toBeUndefined();
@@ -210,14 +239,23 @@ describe('uninstallHooks', () => {
     };
     writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
     const result = uninstall();
-    expect(result.removed).toBe(0);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.removedEvents).toEqual([]);
+    expect(result.fileExisted).toBe(true);
     expect(readJson(settingsPath())).toEqual(original);
   });
 
-  test('uninstall on a missing file creates an empty object, no backup', () => {
+  test('uninstall on a missing file is a true no-op: fileExisted=false, no write', () => {
     const result = uninstall();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.fileExisted).toBe(false);
     expect(result.backupPath).toBeNull();
-    expect(readJson(settingsPath())).toEqual({});
+    expect(result.removedEvents).toEqual([]);
+    // PRD §6.1 "restore exact prior state": the file must NOT be
+    // manufactured by uninstall.
+    expect(existsSync(settingsPath())).toBe(false);
   });
 });
 

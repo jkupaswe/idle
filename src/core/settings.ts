@@ -69,12 +69,52 @@ export interface InstallOptions {
   settingsPath?: string;
 }
 
-export interface InstallResult {
-  /** Path the backup was written to, or `null` if there was no prior file. */
-  backupPath: string | null;
-  /** Path that was written. */
-  settingsPath: string;
-}
+/**
+ * Outcome of `installHooks`. Discriminated union — forces callers to
+ * handle each failure mode explicitly. `claude_not_installed` means the
+ * Claude Code home directory isn't there; refuse rather than manufacture
+ * one. `permission_denied` and `malformed_settings` are the I/O failure
+ * modes worth surfacing separately (the CLI prints different remediation
+ * for each).
+ */
+export type InstallResult =
+  | {
+      readonly ok: true;
+      readonly installedEvents: readonly IdleEvent[];
+      readonly backupPath: string | null;
+      readonly settingsPath: string;
+    }
+  | {
+      readonly ok: false;
+      readonly reason:
+        | 'claude_not_installed'
+        | 'permission_denied'
+        | 'malformed_settings';
+      readonly detail: string;
+      readonly settingsPath: string;
+    };
+
+/**
+ * Outcome of `uninstallHooks`. `fileExisted` distinguishes:
+ * - `{ ok: true, removedEvents: [...], fileExisted: true }` — actually uninstalled.
+ * - `{ ok: true, removedEvents: [], fileExisted: true }` — file present but had no idle hooks.
+ * - `{ ok: true, removedEvents: [], fileExisted: false }` — no file at all; no-op.
+ * The CLI layer uses `fileExisted` to pick the right user message.
+ */
+export type UninstallResult =
+  | {
+      readonly ok: true;
+      readonly removedEvents: readonly IdleEvent[];
+      readonly backupPath: string | null;
+      readonly settingsPath: string;
+      readonly fileExisted: boolean;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: 'permission_denied' | 'malformed_settings';
+      readonly detail: string;
+      readonly settingsPath: string;
+    };
 
 /**
  * Add Idle's four hook entries to settings.json. Idempotent: running twice
@@ -82,42 +122,124 @@ export interface InstallResult {
  *
  * - Reads the existing settings (or `{}` if missing).
  * - Writes a backup to `<settings>.idle-backup-<suffix>`.
- * - Removes any pre-existing `# idle:v1` entries (ensures idempotency).
- * - Appends one command entry per event under matcher `""`.
+ * - Removes any pre-existing Idle entries (keeps install idempotent).
+ * - Appends one command entry per event under matcher `""`, with
+ *   `async: true` on the three async events.
  * - Writes atomically.
+ *
+ * Failure modes are returned as `ok: false` — never thrown.
  */
 export function installHooks(options: InstallOptions = {}): InstallResult {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
   const hooksDir = options.hooksDir ?? defaultHooksDir();
 
-  const current = readSettings(settingsPath);
+  if (!existsSync(dirname(settingsPath))) {
+    return {
+      ok: false,
+      reason: 'claude_not_installed',
+      detail: `Claude Code home directory not found: ${dirname(settingsPath)}`,
+      settingsPath,
+    };
+  }
+
+  let current: SettingsFile;
+  try {
+    current = readSettings(settingsPath);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'malformed_settings',
+      detail: errMessage(err),
+      settingsPath,
+    };
+  }
+
   const backupPath = backupIfPresent(settingsPath);
   const next = addIdleHooks(current, hooksDir);
-  atomicWriteJson(settingsPath, next);
-  return { backupPath, settingsPath };
-}
 
-export interface UninstallResult {
-  backupPath: string | null;
-  settingsPath: string;
-  /** Number of Idle hook entries removed. */
-  removed: number;
+  try {
+    atomicWriteJson(settingsPath, next);
+  } catch (err) {
+    if (isPermissionDenied(err)) {
+      return {
+        ok: false,
+        reason: 'permission_denied',
+        detail: errMessage(err),
+        settingsPath,
+      };
+    }
+    throw err;
+  }
+
+  return {
+    ok: true,
+    installedEvents: IDLE_HOOK_EVENTS.map((h) => h.event),
+    backupPath,
+    settingsPath,
+  };
 }
 
 /**
- * Remove every Idle-tagged hook entry from settings.json. Empty matcher
+ * Remove every Idle-owned hook entry from settings.json. Empty matcher
  * groups are removed; an empty event array is removed; an empty `hooks`
  * object is removed. Preserves all other user keys.
+ *
+ * Critical: uninstall on a file that does not exist is a true no-op —
+ * it does NOT manufacture an empty settings.json (per PRD §6.1's
+ * "restore exact prior state" requirement).
  */
 export function uninstallHooks(
   options: Pick<InstallOptions, 'settingsPath'> = {},
 ): UninstallResult {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
-  const current = readSettings(settingsPath);
+
+  const fileExisted = existsSync(settingsPath);
+  if (!fileExisted) {
+    return {
+      ok: true,
+      removedEvents: [],
+      backupPath: null,
+      settingsPath,
+      fileExisted: false,
+    };
+  }
+
+  let current: SettingsFile;
+  try {
+    current = readSettings(settingsPath);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'malformed_settings',
+      detail: errMessage(err),
+      settingsPath,
+    };
+  }
+
   const backupPath = backupIfPresent(settingsPath);
-  const { next, removed } = removeIdleHooks(current);
-  atomicWriteJson(settingsPath, next);
-  return { backupPath, settingsPath, removed };
+  const { next, removedEvents } = removeIdleHooks(current);
+
+  try {
+    atomicWriteJson(settingsPath, next);
+  } catch (err) {
+    if (isPermissionDenied(err)) {
+      return {
+        ok: false,
+        reason: 'permission_denied',
+        detail: errMessage(err),
+        settingsPath,
+      };
+    }
+    throw err;
+  }
+
+  return {
+    ok: true,
+    removedEvents,
+    backupPath,
+    settingsPath,
+    fileExisted: true,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -182,13 +304,13 @@ function addIdleHooks(
 
 function removeIdleHooks(settings: SettingsFile): {
   next: SettingsFile;
-  removed: number;
+  removedEvents: readonly IdleEvent[];
 } {
   if (!settings.hooks || typeof settings.hooks !== 'object') {
-    return { next: settings, removed: 0 };
+    return { next: settings, removedEvents: [] };
   }
 
-  let removed = 0;
+  const touched = new Set<string>();
   const hooksOut: Record<string, MatcherGroup[]> = {};
 
   for (const [event, rawGroups] of Object.entries(settings.hooks)) {
@@ -208,7 +330,7 @@ function removeIdleHooks(settings: SettingsFile): {
           typeof h === 'object' &&
           typeof h.command === 'string' &&
           h.command.includes(IDLE_TAG);
-        if (isIdle) removed += 1;
+        if (isIdle) touched.add(event);
         return !isIdle;
       });
       if (cleanedHooks.length > 0) {
@@ -226,7 +348,8 @@ function removeIdleHooks(settings: SettingsFile): {
   } else {
     next.hooks = hooksOut;
   }
-  return { next, removed };
+  const removedEvents = IDLE_EVENTS.filter((e) => touched.has(e));
+  return { next, removedEvents };
 }
 
 function commandFor(hook: IdleHookEvent, hooksDir: string): string {
@@ -278,11 +401,21 @@ function defaultHooksDir(): string {
   return resolve(dirname(here), '..', 'hooks');
 }
 
-function isNotFound(err: unknown): boolean {
+function isNotFound(err: unknown): err is NodeJS.ErrnoException {
   return (
     typeof err === 'object' &&
     err !== null &&
     'code' in err &&
-    (err as { code?: string }).code === 'ENOENT'
+    err.code === 'ENOENT'
   );
+}
+
+function isPermissionDenied(err: unknown): err is NodeJS.ErrnoException {
+  if (typeof err !== 'object' || err === null || !('code' in err)) return false;
+  const code = err.code;
+  return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
