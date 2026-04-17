@@ -33,8 +33,21 @@ This code writes to `~/.claude/settings.json` — the user's live Claude Code co
 1. **Every file write under `~/.claude/` is atomic.** Write to temp file, fsync, rename. Never write in place.
 2. **Every destructive operation creates a timestamped backup first.** No exceptions.
 3. **The uninstall path must be provably reversible.** Tests must verify that `install → uninstall` returns settings.json byte-identical to the pre-install state (modulo the backup file).
-4. **Never use `fs.writeFileSync` on settings.json directly.** Use the helpers in `src/core/settings.ts`.
+4. **Never use `fs.writeFileSync` on settings.json directly.** Use `atomicWriteFile` from `src/lib/fs.ts`, or the named helpers in `src/core/settings.ts`.
 5. **Hook scripts must be defensive about malformed input.** Claude Code's hook JSON schema has evolved; never assume a field exists without checking.
+
+## Shared safety primitives (use these, don't reimplement)
+
+Reach for these helpers before writing a local version. If a primitive should exist but doesn't, file a follow-up ticket or leave a PR comment — don't inline a new one.
+
+- `writeAllSync(fd, buffer)` — `src/lib/fs.ts`. Atomic full-buffer write that handles short-write edge cases on NFS / FUSE / container overlays. Use for any `fs.writeSync` on a file users care about.
+- `atomicWriteFile(path, contents)` — `src/lib/fs.ts`. Temp + `fsync` + `rename`; layers on `writeAllSync`. The default write path for state.json and settings.json.
+- `timestampSuffix()` / `nowIso()` — `src/lib/time.ts`. Filename-safe ISO suffixes for backup files; ISO-8601 strings for logs and on-disk timestamps.
+- `isAbsolutePath` / `asAbsolutePath` — `src/core/config.ts` (brand re-exported from `src/lib/types.ts`). Validation + brand crossing for POSIX absolute paths.
+- `isSessionId` — `src/lib/types.ts`. Branded `SessionId` guard for Claude Code session identifiers.
+- `isValidSessionEntry` — `src/lib/types.ts`. Per-entry schema guard for `SessionState.sessions`; malformed entries are backed up to a sidecar rather than crashing helpers.
+- `ms(n)` — `src/lib/types.ts`. `Milliseconds` constructor with non-negative-finite validation. Prevents seconds-vs-ms bugs at call sites.
+- `log(level, msg, meta?)` — `src/lib/log.ts`. Debug logger; never throws. Never `console.*` inside hook scripts.
 
 ## Testing requirements
 
