@@ -1,0 +1,116 @@
+/**
+ * Cross-platform native notifications.
+ *
+ * - macOS: shell out to `osascript` with AppleScript `display notification`.
+ * - Linux: shell out to `notify-send` when present, else fall back to stderr.
+ * - Other platforms: fall back to stderr.
+ *
+ * Failures never throw. A Claude Code session must not break because a
+ * notification couldn't be delivered.
+ *
+ * For tests, `IDLE_NOTIFY_PLATFORM` overrides `process.platform`, and the
+ * module calls `child_process.execFile` (not `exec`), so mocks can be
+ * installed via `vi.mock('node:child_process')`.
+ */
+
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+import { log } from '../lib/log.js';
+
+const execFileP = promisify(execFile);
+
+export interface NotifyInput {
+  /** Notification title (usually `"Idle"`). */
+  title: string;
+  /** Notification body — the break suggestion sentence. */
+  body: string;
+  /** When true and the platform supports it, play a sound. */
+  sound?: boolean;
+}
+
+/**
+ * Trigger a native OS notification. Resolves regardless of delivery outcome;
+ * failures are logged and fall back to stderr.
+ */
+export async function notify(input: NotifyInput): Promise<void> {
+  const { title, body } = input;
+  const platform = currentPlatform();
+
+  try {
+    if (platform === 'darwin') {
+      await sendMac(input);
+      return;
+    }
+    if (platform === 'linux') {
+      if (await hasNotifySend()) {
+        await sendLinux(input);
+        return;
+      }
+      log('warn', 'notify: notify-send not found; falling back to stderr');
+      writeStderr(title, body);
+      return;
+    }
+    // Windows (v2) and anything else: stderr is the only sane default.
+    writeStderr(title, body);
+  } catch (err) {
+    log('warn', 'notify: delivery failed, falling back to stderr', {
+      platform,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    writeStderr(title, body);
+  }
+}
+
+/**
+ * Escape a string for safe embedding inside an AppleScript string literal.
+ * AppleScript string literals are double-quoted; backslash and double-quote
+ * are the only characters that need escaping.
+ */
+export function escapeAppleScriptString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/** Compose the `osascript -e` argument for a given input. */
+export function buildMacAppleScript(input: NotifyInput): string {
+  const body = escapeAppleScriptString(input.body);
+  const title = escapeAppleScriptString(input.title);
+  let script = `display notification "${body}" with title "${title}"`;
+  if (input.sound) {
+    script += ` sound name "Ping"`;
+  }
+  return script;
+}
+
+// ---------------------------------------------------------------------------
+// Platform dispatch
+// ---------------------------------------------------------------------------
+
+async function sendMac(input: NotifyInput): Promise<void> {
+  const script = buildMacAppleScript(input);
+  await execFileP('osascript', ['-e', script]);
+}
+
+async function sendLinux(input: NotifyInput): Promise<void> {
+  const args = [input.title, input.body];
+  await execFileP('notify-send', args);
+}
+
+async function hasNotifySend(): Promise<boolean> {
+  try {
+    await execFileP('which', ['notify-send']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeStderr(title: string, body: string): void {
+  process.stderr.write(`${title}: ${body}\n`);
+}
+
+function currentPlatform(): NodeJS.Platform | string {
+  const override = process.env.IDLE_NOTIFY_PLATFORM;
+  if (override && override.length > 0) return override;
+  return process.platform;
+}
