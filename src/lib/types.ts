@@ -14,6 +14,55 @@
  */
 
 // ---------------------------------------------------------------------------
+// Branded primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * String branded as a Claude Code session identifier. Hooks receive raw
+ * strings from JSON; they must narrow through `isSessionId` before handing
+ * the value to state helpers. Brand-only — no runtime structure.
+ */
+export type SessionId = string & { readonly __brand: 'SessionId' };
+
+/**
+ * Predicate that validates a Claude Code session identifier. Session IDs
+ * are filesystem-safe (Idle writes `<session_id>.json` under
+ * `~/.idle/sessions/`), so the check rejects path separators, control
+ * characters, empty strings, and values longer than 256 characters.
+ */
+export function isSessionId(value: unknown): value is SessionId {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    // eslint-disable-next-line no-control-regex
+    !/[\x00-\x1f/\\]/.test(value)
+  );
+}
+
+/**
+ * Number branded as a duration in milliseconds. Prevents the classic
+ * seconds-vs-milliseconds bug at call sites: consumers write
+ * `{ timeoutMs: ms(200) }`, not `{ timeoutMs: 200 }`. Mint via the `ms`
+ * helper — no other production path produces a `Milliseconds`.
+ */
+export type Milliseconds = number & { readonly __brand: 'Milliseconds' };
+
+/**
+ * Mint a `Milliseconds` value from a non-negative finite number of ms.
+ * Throws on NaN, infinity, or negatives — runtime validation for what the
+ * brand promises.
+ */
+export function ms(n: number): Milliseconds {
+  if (!Number.isFinite(n) || n < 0) {
+    throw new RangeError(`ms(): expected non-negative finite number, got ${n}`);
+  }
+  // ts-assert: the brand is a compile-time marker with no runtime structure;
+  // the finite/non-negative check above is the runtime half of the contract.
+  return n as Milliseconds;
+}
+
+// ---------------------------------------------------------------------------
 // Tone presets
 // ---------------------------------------------------------------------------
 
