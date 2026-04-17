@@ -29,8 +29,28 @@ interface CliResult {
 }
 
 async function runCli(args: readonly string[], env: NodeJS.ProcessEnv = {}): Promise<CliResult> {
+  return runWith('node', [binIdle, ...args], env);
+}
+
+/**
+ * Invoke bin/idle directly so the OS exercises the shebang. This catches
+ * regressions the `node bin/idle` path misses: missing exec bit, broken
+ * shebang, tsx/esm/api loader failure.
+ */
+async function runCliDirect(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = {},
+): Promise<CliResult> {
+  return runWith(binIdle, [...args], env);
+}
+
+async function runWith(
+  cmd: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<CliResult> {
   try {
-    const { stdout, stderr } = await execFileAsync('node', [binIdle, ...args], {
+    const { stdout, stderr } = await execFileAsync(cmd, args as string[], {
       env: { ...process.env, ...env },
       timeout: 30_000,
     });
@@ -59,6 +79,13 @@ describe('bin/idle shape', () => {
   test('is executable on disk', () => {
     const mode = statSync(binIdle).mode;
     expect(mode & 0o111).not.toBe(0);
+  });
+
+  test('direct-exec via shebang prints --version', async () => {
+    const { stdout, stderr, code } = await runCliDirect(['--version'], { IDLE_HOME: sandbox });
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });
 
