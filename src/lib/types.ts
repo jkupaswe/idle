@@ -14,6 +14,55 @@
  */
 
 // ---------------------------------------------------------------------------
+// Branded primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * String branded as a Claude Code session identifier. Hooks receive raw
+ * strings from JSON; they must narrow through `isSessionId` before handing
+ * the value to state helpers. Brand-only — no runtime structure.
+ */
+export type SessionId = string & { readonly __brand: 'SessionId' };
+
+/**
+ * Predicate that validates a Claude Code session identifier. Session IDs
+ * are filesystem-safe (Idle writes `<session_id>.json` under
+ * `~/.idle/sessions/`), so the check rejects path separators, control
+ * characters, empty strings, and values longer than 256 characters.
+ */
+export function isSessionId(value: unknown): value is SessionId {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    // eslint-disable-next-line no-control-regex
+    !/[\x00-\x1f/\\]/.test(value)
+  );
+}
+
+/**
+ * Number branded as a duration in milliseconds. Prevents the classic
+ * seconds-vs-milliseconds bug at call sites: consumers write
+ * `{ timeoutMs: ms(200) }`, not `{ timeoutMs: 200 }`. Mint via the `ms`
+ * helper — no other production path produces a `Milliseconds`.
+ */
+export type Milliseconds = number & { readonly __brand: 'Milliseconds' };
+
+/**
+ * Mint a `Milliseconds` value from a non-negative finite number of ms.
+ * Throws on NaN, infinity, or negatives — runtime validation for what the
+ * brand promises.
+ */
+export function ms(n: number): Milliseconds {
+  if (!Number.isFinite(n) || n < 0) {
+    throw new RangeError(`ms(): expected non-negative finite number, got ${n}`);
+  }
+  // ts-assert: the brand is a compile-time marker with no runtime structure;
+  // the finite/non-negative check above is the runtime half of the contract.
+  return n as Milliseconds;
+}
+
+// ---------------------------------------------------------------------------
 // Tone presets
 // ---------------------------------------------------------------------------
 
@@ -176,6 +225,18 @@ export interface NotificationsConfig {
   sound: boolean;
 }
 
+/**
+ * String branded as an absolute filesystem path.
+ *
+ * Brand-only; no structural members. A plain `string` cannot be passed where
+ * an `AbsolutePath` is expected — callers must narrow it through the
+ * `isAbsolutePath` type guard exported from `src/core/config.ts` (which is
+ * where runtime validation lives). Kept here so every module that imports
+ * `IdleConfig` sees the same branded key type, without pulling in the
+ * validation surface.
+ */
+export type AbsolutePath = string & { readonly __brand: 'AbsolutePath' };
+
 /** Per-project override. Keyed by absolute project path in the parent map. */
 export interface ProjectOverride {
   /** When false, Idle does nothing for sessions rooted in this project. */
@@ -193,8 +254,12 @@ export interface IdleConfig {
   thresholds: ThresholdsConfig;
   tone: ToneConfig;
   notifications: NotificationsConfig;
-  /** Per-project overrides keyed by absolute project path. */
-  projects: Record<string, ProjectOverride>;
+  /**
+   * Per-project overrides keyed by an absolute filesystem path. The map
+   * value itself is readonly — mutations must construct a new map and
+   * reassign the field.
+   */
+  projects: Readonly<Record<AbsolutePath, ProjectOverride>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +308,92 @@ export interface SessionEntry {
 export interface SessionState {
   /** Keyed by Claude Code `session_id`. */
   sessions: Record<string, SessionEntry>;
+}
+
+/**
+ * Type predicate that validates a raw `unknown` against the `SessionEntry`
+ * schema. Enforces the required fields and checks the types of optional
+ * fields when they are present. Used by `readState` and the state-mutation
+ * path to drop malformed entries on disk — if the shape doesn't match,
+ * helpers like `consumePendingCheckin` would otherwise crash on
+ * `entry.checkins is not iterable`.
+ */
+export function isValidSessionEntry(x: unknown): x is SessionEntry {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false;
+
+  if (!('started_at' in x) || typeof x.started_at !== 'string') return false;
+  if (!('project_path' in x) || typeof x.project_path !== 'string') return false;
+  if (
+    !('tool_calls_since_checkin' in x) ||
+    typeof x.tool_calls_since_checkin !== 'number' ||
+    !Number.isFinite(x.tool_calls_since_checkin)
+  ) {
+    return false;
+  }
+  if (
+    !('total_tool_calls' in x) ||
+    typeof x.total_tool_calls !== 'number' ||
+    !Number.isFinite(x.total_tool_calls)
+  ) {
+    return false;
+  }
+  if (
+    !('last_checkin_at' in x) ||
+    !(x.last_checkin_at === null || typeof x.last_checkin_at === 'string')
+  ) {
+    return false;
+  }
+  if (
+    !('checkins' in x) ||
+    !Array.isArray(x.checkins) ||
+    !x.checkins.every((c) => typeof c === 'string')
+  ) {
+    return false;
+  }
+
+  // Optional fields: if present, must be the right type (not null, not wrong type).
+  if ('disabled' in x && x.disabled !== undefined && typeof x.disabled !== 'boolean') {
+    return false;
+  }
+  if (
+    'pending_checkin' in x &&
+    x.pending_checkin !== undefined &&
+    typeof x.pending_checkin !== 'boolean'
+  ) {
+    return false;
+  }
+  if (
+    'last_tool_name' in x &&
+    x.last_tool_name !== undefined &&
+    typeof x.last_tool_name !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    'last_tool_summary' in x &&
+    x.last_tool_summary !== undefined &&
+    typeof x.last_tool_summary !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    'subagent_tool_calls_since_checkin' in x &&
+    x.subagent_tool_calls_since_checkin !== undefined &&
+    (typeof x.subagent_tool_calls_since_checkin !== 'number' ||
+      !Number.isFinite(x.subagent_tool_calls_since_checkin))
+  ) {
+    return false;
+  }
+  if (
+    'total_subagent_tool_calls' in x &&
+    x.total_subagent_tool_calls !== undefined &&
+    (typeof x.total_subagent_tool_calls !== 'number' ||
+      !Number.isFinite(x.total_subagent_tool_calls))
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
