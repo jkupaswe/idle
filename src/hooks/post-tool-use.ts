@@ -25,6 +25,8 @@ import { log } from '../lib/log.js';
 import type { IdleConfig } from '../lib/types.js';
 import { isSessionId } from '../lib/types.js';
 
+import { summarizeToolInput } from './tool-summary.js';
+
 /**
  * Execute the PostToolUse hook against an already-read stdin buffer.
  * Returns an exit code. Never throws.
@@ -49,7 +51,7 @@ export async function run(input: string): Promise<number> {
     return 0;
   }
 
-  const summary = summarizeToolInput(tool_input);
+  const summary = summarizeToolInput(tool_name, tool_input);
   const config = safeLoadConfig();
 
   const result = await incrementToolCounter(
@@ -102,27 +104,6 @@ function parsePayload(input: string): PostToolUseFields | null {
     tool_name: obj.tool_name,
     tool_input: obj.tool_input,
   };
-}
-
-/**
- * Produce a short string representation of the tool input. The 200-char
- * cap is enforced inside `incrementToolCounter`; we pre-slice to avoid
- * passing megabytes of stringified JSON through the helper just to have
- * it thrown away. Fallback to `String(value)` if JSON.stringify throws
- * (e.g. cycles), which should be rare in practice.
- */
-function summarizeToolInput(value: unknown): string {
-  if (value === undefined) return '';
-  try {
-    const json = JSON.stringify(value);
-    return typeof json === 'string' ? json.slice(0, 400) : '';
-  } catch {
-    try {
-      return String(value).slice(0, 400);
-    } catch {
-      return '';
-    }
-  }
 }
 
 function safeLoadConfig(): Readonly<IdleConfig> {

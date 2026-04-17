@@ -72,8 +72,83 @@ describe('post-tool-use hook', () => {
     expect(entry!.tool_calls_since_checkin).toBe(1);
     expect(entry!.total_tool_calls).toBe(1);
     expect(entry!.last_tool_name).toBe('Bash');
-    expect(entry!.last_tool_summary).toContain('ls -la');
+    // Hook uses allowlist extraction, not raw JSON stringification: for
+    // Bash we emit "$ <first-non-env-assignment-token>", never the args.
+    expect(entry!.last_tool_summary).toBe('$ ls');
     expect(entry!.pending_checkin).toBeUndefined();
+  });
+
+  test('Bash secrets in command args never reach state or archive', async () => {
+    await seedSession('sess_abc123');
+    const payload = JSON.stringify({
+      session_id: 'sess_abc123',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: {
+        command:
+          'curl -H "Authorization: Bearer sk-abcdef1234567890abcdef" ' +
+          'https://api.openai.com/v1/chat ' +
+          'OPENAI_API_KEY=sk-leakedSECRETabcdef1234567890',
+      },
+    });
+    await runPostToolUse(payload);
+    const entry = readState().state.sessions['sess_abc123']!;
+    expect(entry.last_tool_summary).toBe('$ curl');
+    expect(entry.last_tool_summary).not.toContain('sk-abcdef');
+    expect(entry.last_tool_summary).not.toContain('Bearer');
+    expect(entry.last_tool_summary).not.toContain('OPENAI_API_KEY');
+  });
+
+  test('Edit old_string/new_string content is never summarized', async () => {
+    await seedSession('sess_abc123');
+    const payload = JSON.stringify({
+      session_id: 'sess_abc123',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Edit',
+      tool_input: {
+        file_path: '/Users/dev/project/src/auth.ts',
+        old_string: 'const API_KEY = "sk-SECRETabcdef1234567890abcdef";',
+        new_string: 'const API_KEY = process.env.API_KEY;',
+      },
+    });
+    await runPostToolUse(payload);
+    const entry = readState().state.sessions['sess_abc123']!;
+    expect(entry.last_tool_summary).toBe('/Users/dev/project/src/auth.ts');
+    expect(entry.last_tool_summary).not.toContain('sk-SECRET');
+    expect(entry.last_tool_summary).not.toContain('API_KEY');
+  });
+
+  test('Write.content is never persisted, only the file path', async () => {
+    await seedSession('sess_abc123');
+    const payload = JSON.stringify({
+      session_id: 'sess_abc123',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      tool_input: {
+        file_path: '/tmp/notes.md',
+        content:
+          'TODO: rotate AWS creds. Current: AKIAIOSFODNN7EXAMPLE, Bearer abcdef1234567890abcdef',
+      },
+    });
+    await runPostToolUse(payload);
+    const entry = readState().state.sessions['sess_abc123']!;
+    expect(entry.last_tool_summary).toBe('/tmp/notes.md');
+    expect(entry.last_tool_summary).not.toContain('AKIA');
+  });
+
+  test('unknown tool produces keys-only, never values', async () => {
+    await seedSession('sess_abc123');
+    const payload = JSON.stringify({
+      session_id: 'sess_abc123',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'MysteryTool',
+      tool_input: { secret_key: 'sk-leakeabcdef1234567890abcdef', normal: 'ok' },
+    });
+    await runPostToolUse(payload);
+    const entry = readState().state.sessions['sess_abc123']!;
+    expect(entry.last_tool_summary).toBe('keys:normal,secret_key');
+    expect(entry.last_tool_summary).not.toContain('sk-');
+    expect(entry.last_tool_summary).not.toContain('leaked');
   });
 
   test('does not write to stdout', async () => {
@@ -142,14 +217,15 @@ describe('post-tool-use hook', () => {
     );
   });
 
-  test('tool summary is capped at 200 characters', async () => {
+  test('state helper caps last_tool_summary at 200 characters', async () => {
     await seedSession('sess_abc123');
-    const bigInput = { blob: 'x'.repeat(5_000) };
+    // Long file_path goes through the safe extractor; state.ts truncates to 200.
+    const longPath = '/' + 'a'.repeat(5_000);
     const payload = JSON.stringify({
       session_id: 'sess_abc123',
       hook_event_name: 'PostToolUse',
-      tool_name: 'Bash',
-      tool_input: bigInput,
+      tool_name: 'Read',
+      tool_input: { file_path: longPath },
     });
     await runPostToolUse(payload);
     const entry = readState().state.sessions['sess_abc123'];
