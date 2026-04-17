@@ -191,29 +191,22 @@ export function installHooks(options: InstallOptions = {}): InstallResult {
   try {
     current = readSettings(settingsPath);
   } catch (err) {
-    return {
-      ok: false,
-      reason: 'malformed_settings',
-      detail: errMessage(err),
-      settingsPath,
-    };
+    return classifyIoError(err, settingsPath);
   }
 
-  const backupPath = backupIfPresent(settingsPath);
+  let backupPath: string | null;
+  try {
+    backupPath = backupIfPresent(settingsPath);
+  } catch (err) {
+    return classifyIoError(err, settingsPath);
+  }
+
   const next = addIdleHooks(current, hooksDir);
 
   try {
     atomicWriteJson(settingsPath, next);
   } catch (err) {
-    if (isPermissionDenied(err)) {
-      return {
-        ok: false,
-        reason: 'permission_denied',
-        detail: errMessage(err),
-        settingsPath,
-      };
-    }
-    throw err;
+    return classifyIoError(err, settingsPath);
   }
 
   return {
@@ -253,29 +246,22 @@ export function uninstallHooks(
   try {
     current = readSettings(settingsPath);
   } catch (err) {
-    return {
-      ok: false,
-      reason: 'malformed_settings',
-      detail: errMessage(err),
-      settingsPath,
-    };
+    return classifyIoError(err, settingsPath);
   }
 
-  const backupPath = backupIfPresent(settingsPath);
+  let backupPath: string | null;
+  try {
+    backupPath = backupIfPresent(settingsPath);
+  } catch (err) {
+    return classifyIoError(err, settingsPath);
+  }
+
   const { next, removedEvents } = removeIdleHooks(current);
 
   try {
     atomicWriteJson(settingsPath, next);
   } catch (err) {
-    if (isPermissionDenied(err)) {
-      return {
-        ok: false,
-        reason: 'permission_denied',
-        detail: errMessage(err),
-        settingsPath,
-      };
-    }
-    throw err;
+    return classifyIoError(err, settingsPath);
   }
 
   return {
@@ -505,6 +491,41 @@ function isPermissionDenied(err: unknown): err is NodeJS.ErrnoException {
   if (typeof err !== 'object' || err === null || !('code' in err)) return false;
   const code = err.code;
   return code === 'EACCES' || code === 'EPERM' || code === 'EROFS';
+}
+
+/**
+ * Produce a failure result for an I/O or parse error encountered during
+ * install / uninstall. Permission-class errors route to
+ * `permission_denied`; everything else (including the explicit parse
+ * errors from `readSettings`) routes to `malformed_settings`.
+ *
+ * Kept in one place so the three call sites (read, backup, write) can't
+ * drift — the round-4 code had EACCES mislabeled as `malformed_settings`
+ * and a backup failure that wasn't caught at all.
+ */
+function classifyIoError(
+  err: unknown,
+  settingsPath: string,
+): {
+  readonly ok: false;
+  readonly reason: 'permission_denied' | 'malformed_settings';
+  readonly detail: string;
+  readonly settingsPath: string;
+} {
+  if (isPermissionDenied(err)) {
+    return {
+      ok: false,
+      reason: 'permission_denied',
+      detail: errMessage(err),
+      settingsPath,
+    };
+  }
+  return {
+    ok: false,
+    reason: 'malformed_settings',
+    detail: errMessage(err),
+    settingsPath,
+  };
 }
 
 function errMessage(err: unknown): string {

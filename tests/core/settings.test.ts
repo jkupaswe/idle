@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -488,6 +489,82 @@ describe('buildHookCommand (shell escaping)', () => {
     if (!uninstallResult.ok) throw new Error('unreachable');
     expect(uninstallResult.removedEvents).toEqual([...IDLE_EVENTS]);
   });
+});
+
+describe('permission errors (EACCES / EPERM)', () => {
+  // chmod-based simulation only works as non-root. CI runners (and Docker
+  // images) sometimes run as root, in which case a 0o000 file is still
+  // readable. Skip rather than emit a false pass.
+  const runAsNonRoot =
+    typeof process.getuid === 'function' && process.getuid() !== 0
+      ? test
+      : test.skip;
+
+  runAsNonRoot(
+    'unreadable settings.json → ok:false reason=permission_denied',
+    () => {
+      const p = settingsPath();
+      writeFileSync(p, JSON.stringify({ hooks: {} }));
+      chmodSync(p, 0o000);
+      try {
+        const r = install();
+        expect(r.ok).toBe(false);
+        if (!r.ok) {
+          expect(r.reason).toBe('permission_denied');
+          expect(r.detail).toBeTruthy();
+        }
+      } finally {
+        chmodSync(p, 0o644);
+      }
+    },
+  );
+
+  runAsNonRoot(
+    'unwritable parent dir (backup fails) → permission_denied',
+    () => {
+      writeFileSync(settingsPath(), JSON.stringify({ hooks: {} }));
+      chmodSync(tmp, 0o500); // read + execute, no write
+      try {
+        const r = install();
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toBe('permission_denied');
+      } finally {
+        chmodSync(tmp, 0o755);
+      }
+    },
+  );
+
+  runAsNonRoot(
+    'unwritable parent dir on a fresh install → permission_denied (write path)',
+    () => {
+      // No existing settings.json; backup is skipped; atomicWriteJson is
+      // the first thing to hit EACCES.
+      chmodSync(tmp, 0o500);
+      try {
+        const r = install();
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toBe('permission_denied');
+      } finally {
+        chmodSync(tmp, 0o755);
+      }
+    },
+  );
+
+  runAsNonRoot(
+    'uninstall on unreadable settings → permission_denied (not malformed)',
+    () => {
+      const p = settingsPath();
+      writeFileSync(p, JSON.stringify({ hooks: {} }));
+      chmodSync(p, 0o000);
+      try {
+        const r = uninstall();
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toBe('permission_denied');
+      } finally {
+        chmodSync(p, 0o644);
+      }
+    },
+  );
 });
 
 describe('async flag per event', () => {
