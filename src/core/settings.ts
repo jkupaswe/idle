@@ -13,20 +13,11 @@
  * touching anything else the user has configured.
  */
 
-import {
-  closeSync,
-  copyFileSync,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  writeSync,
-} from 'node:fs';
+import { copyFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { atomicWriteFile } from '../lib/fs.js';
 import { claudeSettingsPath } from '../lib/paths.js';
 import { timestampSuffix } from '../lib/time.js';
 
@@ -248,17 +239,7 @@ function backupIfPresent(path: string): string | null {
 }
 
 function atomicWriteJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const contents = JSON.stringify(value, null, 2) + '\n';
-  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  const fd = openSync(tmp, 'w', 0o644);
-  try {
-    writeSync(fd, contents);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
+  atomicWriteFile(path, JSON.stringify(value, null, 2) + '\n');
 }
 
 function defaultHooksDir(): string {
