@@ -176,6 +176,18 @@ export interface NotificationsConfig {
   sound: boolean;
 }
 
+/**
+ * String branded as an absolute filesystem path.
+ *
+ * Brand-only; no structural members. A plain `string` cannot be passed where
+ * an `AbsolutePath` is expected — callers must narrow it through the
+ * `isAbsolutePath` type guard exported from `src/core/config.ts` (which is
+ * where runtime validation lives). Kept here so every module that imports
+ * `IdleConfig` sees the same branded key type, without pulling in the
+ * validation surface.
+ */
+export type AbsolutePath = string & { readonly __brand: 'AbsolutePath' };
+
 /** Per-project override. Keyed by absolute project path in the parent map. */
 export interface ProjectOverride {
   /** When false, Idle does nothing for sessions rooted in this project. */
@@ -193,8 +205,12 @@ export interface IdleConfig {
   thresholds: ThresholdsConfig;
   tone: ToneConfig;
   notifications: NotificationsConfig;
-  /** Per-project overrides keyed by absolute project path. */
-  projects: Record<string, ProjectOverride>;
+  /**
+   * Per-project overrides keyed by an absolute filesystem path. The map
+   * value itself is readonly — mutations must construct a new map and
+   * reassign the field.
+   */
+  projects: Readonly<Record<AbsolutePath, ProjectOverride>>;
 }
 
 // ---------------------------------------------------------------------------

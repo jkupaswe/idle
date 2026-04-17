@@ -36,6 +36,7 @@ import TOML from '@iarna/toml';
 import { idleConfigPath } from '../lib/paths.js';
 import { TONE_PRESETS } from '../lib/types.js';
 import type {
+  AbsolutePath,
   IdleConfig,
   NotificationMethod,
   NotificationsConfig,
@@ -45,22 +46,29 @@ import type {
   TonePreset,
 } from '../lib/types.js';
 
-// ---------------------------------------------------------------------------
-// Branded types
-// ---------------------------------------------------------------------------
+// Re-export so existing importers (`from '../core/config'`) keep working.
+export type { AbsolutePath } from '../lib/types.js';
 
-/**
- * String branded as an absolute filesystem path. Produced only by the
- * `isAbsolutePath` guard below — ordinary strings can't be passed anywhere
- * expecting an `AbsolutePath` without a compile-time error. Follow-up:
- * `IdleConfig.projects` in `src/lib/types.ts` still uses plain `string`
- * keys; branding that requires Architect-owned changes.
- */
-export type AbsolutePath = string & { readonly __brand: 'AbsolutePath' };
+// ---------------------------------------------------------------------------
+// AbsolutePath runtime validation
+// ---------------------------------------------------------------------------
 
 /** Type guard: true when `value` is a POSIX absolute path string. */
 export function isAbsolutePath(value: string): value is AbsolutePath {
   return value.length > 0 && value.startsWith('/');
+}
+
+/**
+ * Narrow a plain `string` to `AbsolutePath` or throw. Callers that already
+ * hold validated input (e.g. from a hook payload where `cwd` is guaranteed
+ * absolute by Claude Code) use this to cross into the branded type without
+ * resorting to a type assertion.
+ */
+export function asAbsolutePath(value: string): AbsolutePath {
+  if (!isAbsolutePath(value)) {
+    throw new Error(`Expected an absolute path, got: ${value}`);
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------
