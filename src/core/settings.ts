@@ -13,11 +13,20 @@
  * touching anything else the user has configured.
  */
 
-import { copyFileSync, existsSync, readFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  copyFileSync,
+  existsSync,
+  readFileSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import lockfile from 'proper-lockfile';
+
 import { atomicWriteFile } from '../lib/fs.js';
+import { log } from '../lib/log.js';
 import { claudeSettingsPath } from '../lib/paths.js';
 import { timestampSuffix } from '../lib/time.js';
 
@@ -118,9 +127,8 @@ export interface InstallOptions {
  * Outcome of `installHooks`. Discriminated union — forces callers to
  * handle each failure mode explicitly. `claude_not_installed` means the
  * Claude Code home directory isn't there; refuse rather than manufacture
- * one. `permission_denied` and `malformed_settings` are the I/O failure
- * modes worth surfacing separately (the CLI prints different remediation
- * for each).
+ * one. `timeout` means we couldn't acquire the settings lock within the
+ * budget (another idle process or stale lockfile).
  */
 export type InstallResult =
   | {
@@ -134,7 +142,8 @@ export type InstallResult =
       readonly reason:
         | 'claude_not_installed'
         | 'permission_denied'
-        | 'malformed_settings';
+        | 'malformed_settings'
+        | 'timeout';
       readonly detail: string;
       readonly settingsPath: string;
     };
@@ -156,10 +165,13 @@ export type UninstallResult =
     }
   | {
       readonly ok: false;
-      readonly reason: 'permission_denied' | 'malformed_settings';
+      readonly reason: 'permission_denied' | 'malformed_settings' | 'timeout';
       readonly detail: string;
       readonly settingsPath: string;
     };
+
+/** Budget for acquiring the settings.json file lock. */
+const SETTINGS_LOCK_TIMEOUT_MS = 10_000;
 
 /**
  * Add Idle's four hook entries to settings.json. Idempotent: running twice
@@ -174,7 +186,9 @@ export type UninstallResult =
  *
  * Failure modes are returned as `ok: false` — never thrown.
  */
-export function installHooks(options: InstallOptions = {}): InstallResult {
+export async function installHooks(
+  options: InstallOptions = {},
+): Promise<InstallResult> {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
   const hooksDir = options.hooksDir ?? defaultHooksDir();
 
@@ -187,34 +201,58 @@ export function installHooks(options: InstallOptions = {}): InstallResult {
     };
   }
 
-  let current: SettingsFile;
-  try {
-    current = readSettings(settingsPath);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
+  const lockResult = await acquireSettingsLock(settingsPath);
+  if (!lockResult.ok) {
+    if (isPermissionDenied(lockResult.err)) {
+      return classifyIoError(lockResult.err, settingsPath);
+    }
+    return {
+      ok: false,
+      reason: 'timeout',
+      detail: `Could not acquire settings lock within ${SETTINGS_LOCK_TIMEOUT_MS}ms: ${settingsPath}`,
+      settingsPath,
+    };
   }
 
-  let backupPath: string | null;
   try {
-    backupPath = backupIfPresent(settingsPath);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
+    let current: SettingsFile;
+    try {
+      current = readSettings(settingsPath);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    let backupPath: string | null;
+    try {
+      backupPath = backupIfPresent(settingsPath);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    const next = addIdleHooks(current, hooksDir);
+
+    try {
+      atomicWriteJson(settingsPath, next);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    return {
+      ok: true,
+      installedEvents: IDLE_HOOK_EVENTS.map((h) => h.event),
+      backupPath,
+      settingsPath,
+    };
+  } finally {
+    try {
+      await lockResult.release();
+    } catch (err) {
+      log('warn', 'settings: lock release failed', {
+        settingsPath,
+        error: errMessage(err),
+      });
+    }
   }
-
-  const next = addIdleHooks(current, hooksDir);
-
-  try {
-    atomicWriteJson(settingsPath, next);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
-  }
-
-  return {
-    ok: true,
-    installedEvents: IDLE_HOOK_EVENTS.map((h) => h.event),
-    backupPath,
-    settingsPath,
-  };
 }
 
 /**
@@ -226,13 +264,13 @@ export function installHooks(options: InstallOptions = {}): InstallResult {
  * it does NOT manufacture an empty settings.json (per PRD §6.1's
  * "restore exact prior state" requirement).
  */
-export function uninstallHooks(
+export async function uninstallHooks(
   options: Pick<InstallOptions, 'settingsPath'> = {},
-): UninstallResult {
+): Promise<UninstallResult> {
   const settingsPath = options.settingsPath ?? claudeSettingsPath();
 
-  const fileExisted = existsSync(settingsPath);
-  if (!fileExisted) {
+  // Missing file is a pure no-op; no lock needed, no file manufactured.
+  if (!existsSync(settingsPath)) {
     return {
       ok: true,
       removedEvents: [],
@@ -242,35 +280,71 @@ export function uninstallHooks(
     };
   }
 
-  let current: SettingsFile;
-  try {
-    current = readSettings(settingsPath);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
+  const lockResult = await acquireSettingsLock(settingsPath);
+  if (!lockResult.ok) {
+    if (isPermissionDenied(lockResult.err)) {
+      return classifyIoError(lockResult.err, settingsPath);
+    }
+    return {
+      ok: false,
+      reason: 'timeout',
+      detail: `Could not acquire settings lock within ${SETTINGS_LOCK_TIMEOUT_MS}ms: ${settingsPath}`,
+      settingsPath,
+    };
   }
 
-  let backupPath: string | null;
   try {
-    backupPath = backupIfPresent(settingsPath);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
+    // Re-check after taking the lock: another process may have removed
+    // the file between the first existsSync and the lock acquisition.
+    if (!existsSync(settingsPath)) {
+      return {
+        ok: true,
+        removedEvents: [],
+        backupPath: null,
+        settingsPath,
+        fileExisted: false,
+      };
+    }
+
+    let current: SettingsFile;
+    try {
+      current = readSettings(settingsPath);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    let backupPath: string | null;
+    try {
+      backupPath = backupIfPresent(settingsPath);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    const { next, removedEvents } = removeIdleHooks(current);
+
+    try {
+      atomicWriteJson(settingsPath, next);
+    } catch (err) {
+      return classifyIoError(err, settingsPath);
+    }
+
+    return {
+      ok: true,
+      removedEvents,
+      backupPath,
+      settingsPath,
+      fileExisted: true,
+    };
+  } finally {
+    try {
+      await lockResult.release();
+    } catch (err) {
+      log('warn', 'settings: lock release failed', {
+        settingsPath,
+        error: errMessage(err),
+      });
+    }
   }
-
-  const { next, removedEvents } = removeIdleHooks(current);
-
-  try {
-    atomicWriteJson(settingsPath, next);
-  } catch (err) {
-    return classifyIoError(err, settingsPath);
-  }
-
-  return {
-    ok: true,
-    removedEvents,
-    backupPath,
-    settingsPath,
-    fileExisted: true,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +577,60 @@ function isPermissionDenied(err: unknown): err is NodeJS.ErrnoException {
  * drift — the round-4 code had EACCES mislabeled as `malformed_settings`
  * and a backup failure that wasn't caught at all.
  */
+/**
+ * Acquire a proper-lockfile lock on the settings path so two concurrent
+ * installers can't lose updates in a read-modify-write race. Atomic
+ * rename alone prevents partial writes but not cross-process update
+ * loss — that's what this guards against.
+ *
+ * Uses `realpath: false` so it works even when settings.json doesn't
+ * exist yet (the parent directory's existence is checked by the caller
+ * via `claude_not_installed`).
+ *
+ * Returns a discriminated result so the caller can distinguish a real
+ * contention timeout from a permission error on the `.lock` directory —
+ * the latter would otherwise retry the mkdir for the full budget with
+ * zero chance of success.
+ */
+async function acquireSettingsLock(settingsPath: string): Promise<
+  | { readonly ok: true; readonly release: () => Promise<void> }
+  | { readonly ok: false; readonly err: unknown }
+> {
+  // Fail fast on clearly unwritable parents. proper-lockfile would
+  // retry mkdir for the entire budget otherwise, and EACCES on a
+  // directory is deterministic — no amount of retrying helps.
+  try {
+    accessSync(dirname(settingsPath), fsConstants.W_OK);
+  } catch (err) {
+    return { ok: false, err };
+  }
+
+  const retries = Math.max(
+    1,
+    Math.floor(SETTINGS_LOCK_TIMEOUT_MS / 100),
+  );
+  try {
+    const release = await lockfile.lock(settingsPath, {
+      realpath: false,
+      retries: {
+        retries,
+        minTimeout: 100,
+        maxTimeout: 100,
+        factor: 1,
+        randomize: false,
+      },
+      stale: 30_000,
+    });
+    return { ok: true, release };
+  } catch (err) {
+    log('warn', 'settings: lock acquisition failed', {
+      settingsPath,
+      error: errMessage(err),
+    });
+    return { ok: false, err };
+  }
+}
+
 function classifyIoError(
   err: unknown,
   settingsPath: string,

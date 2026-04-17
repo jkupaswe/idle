@@ -57,8 +57,8 @@ function readJson<T = unknown>(p: string): T {
 }
 
 describe('installHooks', () => {
-  test('creates settings.json with four Idle hooks when file is missing', () => {
-    const result = install();
+  test('creates settings.json with four Idle hooks when file is missing', async () => {
+    const result = await install();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.backupPath).toBeNull();
@@ -76,9 +76,9 @@ describe('installHooks', () => {
     }
   });
 
-  test('returns ok:false reason=claude_not_installed when ~/.claude is missing', () => {
+  test('returns ok:false reason=claude_not_installed when ~/.claude is missing', async () => {
     const missingDir = join(tmp, 'does-not-exist', 'settings.json');
-    const r = installHooks({
+    const r = await installHooks({
       settingsPath: missingDir,
       hooksDir: hooksDir(),
     });
@@ -90,7 +90,7 @@ describe('installHooks', () => {
     expect(existsSync(missingDir)).toBe(false);
   });
 
-  test('preserves user hooks and unrelated top-level keys', () => {
+  test('preserves user hooks and unrelated top-level keys', async () => {
     const original = {
       apiKeyHelper: '/usr/local/bin/my-helper',
       permissions: { allow: ['Bash(ls)'] },
@@ -111,7 +111,7 @@ describe('installHooks', () => {
     };
     writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
 
-    install();
+    await install();
     const after = readJson<typeof original>(settingsPath());
     expect(after.apiKeyHelper).toBe(original.apiKeyHelper);
     expect(after.permissions).toEqual(original.permissions);
@@ -120,11 +120,11 @@ describe('installHooks', () => {
     expect(bashGroup?.hooks[0]?.command).toBe('user-bash-hook.sh');
   });
 
-  test('writes a timestamped backup when settings.json pre-exists', () => {
+  test('writes a timestamped backup when settings.json pre-exists', async () => {
     const original = { hooks: {} };
     writeFileSync(settingsPath(), JSON.stringify(original));
 
-    const result = install();
+    const result = await install();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.backupPath).toMatch(/\.idle-backup-/);
@@ -133,19 +133,19 @@ describe('installHooks', () => {
     expect(backup).toEqual(original);
   });
 
-  test('is idempotent — running install twice is equivalent to once', () => {
-    install();
+  test('is idempotent — running install twice is equivalent to once', async () => {
+    await install();
     const once = readJson<unknown>(settingsPath());
 
-    install();
+    await install();
     const twice = readJson<unknown>(settingsPath());
 
     expect(twice).toEqual(once);
   });
 
-  test('returns ok:false reason=malformed_settings on invalid JSON', () => {
+  test('returns ok:false reason=malformed_settings on invalid JSON', async () => {
     writeFileSync(settingsPath(), '{not valid json');
-    const r = install();
+    const r = await install();
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.reason).toBe('malformed_settings');
@@ -153,15 +153,15 @@ describe('installHooks', () => {
     }
   });
 
-  test('leaves no .tmp artifact after write', () => {
-    install();
+  test('leaves no .tmp artifact after write', async () => {
+    await install();
     const stray = readdirSync(tmp).find((e) => e.includes('.tmp-'));
     expect(stray).toBeUndefined();
   });
 });
 
 describe('uninstallHooks', () => {
-  test('install then uninstall round-trips byte-identically (JSON-normalized)', () => {
+  test('install then uninstall round-trips byte-identically (JSON-normalized)', async () => {
     const original = {
       apiKeyHelper: '/usr/local/bin/my-helper',
       permissions: { allow: ['Bash(ls)'] },
@@ -182,8 +182,8 @@ describe('uninstallHooks', () => {
     };
     writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
 
-    install();
-    const result = uninstall();
+    await install();
+    const result = await uninstall();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.removedEvents).toEqual([...IDLE_EVENTS]);
@@ -192,9 +192,9 @@ describe('uninstallHooks', () => {
     expect(after).toEqual(original);
   });
 
-  test('removes only Idle hooks and leaves empty groups collapsed', () => {
-    install();
-    const result = uninstall();
+  test('removes only Idle hooks and leaves empty groups collapsed', async () => {
+    await install();
+    const result = await uninstall();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.removedEvents).toEqual([...IDLE_EVENTS]);
@@ -204,7 +204,7 @@ describe('uninstallHooks', () => {
     expect(after.hooks).toBeUndefined();
   });
 
-  test('preserves user hooks that share a matcher with Idle', () => {
+  test('preserves user hooks that share a matcher with Idle', async () => {
     // Pre-seed a user Stop hook that already uses matcher "".
     writeFileSync(
       settingsPath(),
@@ -219,8 +219,8 @@ describe('uninstallHooks', () => {
         },
       }),
     );
-    install();
-    uninstall();
+    await install();
+    await uninstall();
     const after = readJson<{
       hooks: {
         Stop: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
@@ -230,7 +230,7 @@ describe('uninstallHooks', () => {
     expect(after.hooks.Stop[0]!.hooks[0]!.command).toBe('user-stop.sh');
   });
 
-  test('uninstall is safe on a file that never had Idle installed', () => {
+  test('uninstall is safe on a file that never had Idle installed', async () => {
     const original = {
       hooks: {
         PostToolUse: [
@@ -242,7 +242,7 @@ describe('uninstallHooks', () => {
       },
     };
     writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
-    const result = uninstall();
+    const result = await uninstall();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.removedEvents).toEqual([]);
@@ -250,8 +250,8 @@ describe('uninstallHooks', () => {
     expect(readJson(settingsPath())).toEqual(original);
   });
 
-  test('uninstall on a missing file is a true no-op: fileExisted=false, no write', () => {
-    const result = uninstall();
+  test('uninstall on a missing file is a true no-op: fileExisted=false, no write', async () => {
+    const result = await uninstall();
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
     expect(result.fileExisted).toBe(false);
@@ -264,8 +264,8 @@ describe('uninstallHooks', () => {
 });
 
 describe('hook command format', () => {
-  test('commands are single-quoted, include the Idle tag, and point at the expected script', () => {
-    install();
+  test('commands are single-quoted, include the Idle tag, and point at the expected script', async () => {
+    await install();
     const settings = readJson<{
       hooks: Record<
         string,
@@ -288,7 +288,7 @@ describe('hook command format', () => {
 });
 
 describe('isIdleOwnedCommand predicate', () => {
-  test('accepts Idle-emitted commands (unquoted path)', () => {
+  test('accepts Idle-emitted commands (unquoted path)', async () => {
     expect(
       isIdleOwnedCommand(
         `npx tsx /path/to/session-start.ts ${IDLE_TAG}`,
@@ -301,7 +301,7 @@ describe('isIdleOwnedCommand predicate', () => {
     ).toBe(true);
   });
 
-  test('accepts Idle-emitted commands (single-quoted path with spaces)', () => {
+  test('accepts Idle-emitted commands (single-quoted path with spaces)', async () => {
     expect(
       isIdleOwnedCommand(
         `npx tsx '/Users/Alice Smith/idle/hooks/post-tool-use.ts' ${IDLE_TAG}`,
@@ -309,13 +309,13 @@ describe('isIdleOwnedCommand predicate', () => {
     ).toBe(true);
   });
 
-  test('rejects a user command that mentions the tag as a substring', () => {
+  test('rejects a user command that mentions the tag as a substring', async () => {
     expect(
       isIdleOwnedCommand('echo keep me # idle:v1 but not idle'),
     ).toBe(false);
   });
 
-  test('rejects a user command that ends with the tag but is not ours', () => {
+  test('rejects a user command that ends with the tag but is not ours', async () => {
     expect(
       isIdleOwnedCommand(`bash /home/bob/mine.sh ${IDLE_TAG}`),
     ).toBe(false);
@@ -324,7 +324,7 @@ describe('isIdleOwnedCommand predicate', () => {
     ).toBe(false);
   });
 
-  test('rejects commands missing the prefix or suffix', () => {
+  test('rejects commands missing the prefix or suffix', async () => {
     expect(
       isIdleOwnedCommand(`/path/to/stop.ts ${IDLE_TAG}`),
     ).toBe(false);
@@ -334,7 +334,7 @@ describe('isIdleOwnedCommand predicate', () => {
     expect(isIdleOwnedCommand('')).toBe(false);
   });
 
-  test('rejects trailing garbage after the tag', () => {
+  test('rejects trailing garbage after the tag', async () => {
     expect(
       isIdleOwnedCommand(`npx tsx /path/stop.ts ${IDLE_TAG} oops`),
     ).toBe(false);
@@ -342,7 +342,7 @@ describe('isIdleOwnedCommand predicate', () => {
 });
 
 describe('uninstall: tightened ownership detection', () => {
-  test("user hook containing the tag in its body is preserved", () => {
+  test("user hook containing the tag in its body is preserved", async () => {
     // Author's command mentions the marker text but is not Idle's.
     const userHook = `echo "owned by me # idle:v1 but not idle"`;
     writeFileSync(
@@ -359,8 +359,8 @@ describe('uninstall: tightened ownership detection', () => {
       }),
     );
 
-    install(); // Adds Idle's Stop hook alongside the user's.
-    const result = uninstall();
+    await install(); // Adds Idle's Stop hook alongside the user's.
+    const result = await uninstall();
     expect(result.ok).toBe(true);
 
     const after = readJson<{
@@ -372,7 +372,7 @@ describe('uninstall: tightened ownership detection', () => {
     expect(after.hooks.Stop[0]!.hooks[0]!.command).toBe(userHook);
   });
 
-  test('user hook with trailing tag but wrong binary is preserved', () => {
+  test('user hook with trailing tag but wrong binary is preserved', async () => {
     const userHook = `bash /home/bob/mine.sh ${IDLE_TAG}`;
     writeFileSync(
       settingsPath(),
@@ -388,8 +388,8 @@ describe('uninstall: tightened ownership detection', () => {
       }),
     );
 
-    install();
-    uninstall();
+    await install();
+    await uninstall();
 
     const after = readJson<{
       hooks: {
@@ -404,14 +404,14 @@ describe('uninstall: tightened ownership detection', () => {
 });
 
 describe('resolveHooksDirFromModule', () => {
-  test('resolves to <pkg>/src/hooks whether called from src/ or dist/', () => {
+  test('resolves to <pkg>/src/hooks whether called from src/ or dist/', async () => {
     const fromSrc = resolveHooksDirFromModule('/pkg/src/core/settings.ts');
     const fromDist = resolveHooksDirFromModule('/pkg/dist/core/settings.js');
     expect(fromSrc).toBe('/pkg/src/hooks');
     expect(fromDist).toBe('/pkg/src/hooks');
   });
 
-  test('never points at dist/hooks (files there are .js, not .ts)', () => {
+  test('never points at dist/hooks (files there are .js, not .ts)', async () => {
     const resolved = resolveHooksDirFromModule('/opt/idle/dist/core/settings.js');
     expect(resolved).not.toMatch(/dist\/hooks$/);
     expect(resolved).toMatch(/src\/hooks$/);
@@ -419,7 +419,7 @@ describe('resolveHooksDirFromModule', () => {
 });
 
 describe('buildHookCommand (shell escaping)', () => {
-  test('plain POSIX path wraps in single quotes', () => {
+  test('plain POSIX path wraps in single quotes', async () => {
     const cmd = buildHookCommand('stop.ts', '/home/alice/idle/hooks');
     expect(cmd).toBe(
       `npx tsx '/home/alice/idle/hooks/stop.ts' ${IDLE_TAG}`,
@@ -427,7 +427,7 @@ describe('buildHookCommand (shell escaping)', () => {
     expect(isIdleOwnedCommand(cmd)).toBe(true);
   });
 
-  test('path with spaces', () => {
+  test('path with spaces', async () => {
     const cmd = buildHookCommand(
       'post-tool-use.ts',
       '/Users/Alice Smith/idle/hooks',
@@ -438,7 +438,7 @@ describe('buildHookCommand (shell escaping)', () => {
     expect(isIdleOwnedCommand(cmd)).toBe(true);
   });
 
-  test('path with a single quote is POSIX-escaped', () => {
+  test('path with a single quote is POSIX-escaped', async () => {
     const cmd = buildHookCommand(
       'session-start.ts',
       "/home/d'angelo/hooks",
@@ -450,7 +450,7 @@ describe('buildHookCommand (shell escaping)', () => {
     expect(isIdleOwnedCommand(cmd)).toBe(true);
   });
 
-  test('path with shell metacharacters is inert inside single quotes', () => {
+  test('path with shell metacharacters is inert inside single quotes', async () => {
     const cmd = buildHookCommand(
       'session-end.ts',
       '/weird/$path with`cmd`/and*glob',
@@ -461,10 +461,10 @@ describe('buildHookCommand (shell escaping)', () => {
     expect(isIdleOwnedCommand(cmd)).toBe(true);
   });
 
-  test('install+uninstall round-trips with a hooks dir containing spaces and quotes', () => {
+  test('install+uninstall round-trips with a hooks dir containing spaces and quotes', async () => {
     // mkdtemp gives a simple path; construct a spacey hooksDir.
     const spacey = join(tmp, "has space and 'quote'");
-    const result = installHooks({
+    const result = await installHooks({
       settingsPath: settingsPath(),
       hooksDir: spacey,
     });
@@ -484,7 +484,7 @@ describe('buildHookCommand (shell escaping)', () => {
     }
 
     // Uninstall removes them all cleanly.
-    const uninstallResult = uninstall();
+    const uninstallResult = await uninstall();
     expect(uninstallResult.ok).toBe(true);
     if (!uninstallResult.ok) throw new Error('unreachable');
     expect(uninstallResult.removedEvents).toEqual([...IDLE_EVENTS]);
@@ -502,12 +502,12 @@ describe('permission errors (EACCES / EPERM)', () => {
 
   runAsNonRoot(
     'unreadable settings.json → ok:false reason=permission_denied',
-    () => {
+    async () => {
       const p = settingsPath();
       writeFileSync(p, JSON.stringify({ hooks: {} }));
       chmodSync(p, 0o000);
       try {
-        const r = install();
+        const r = await install();
         expect(r.ok).toBe(false);
         if (!r.ok) {
           expect(r.reason).toBe('permission_denied');
@@ -521,11 +521,11 @@ describe('permission errors (EACCES / EPERM)', () => {
 
   runAsNonRoot(
     'unwritable parent dir (backup fails) → permission_denied',
-    () => {
+    async () => {
       writeFileSync(settingsPath(), JSON.stringify({ hooks: {} }));
       chmodSync(tmp, 0o500); // read + execute, no write
       try {
-        const r = install();
+        const r = await install();
         expect(r.ok).toBe(false);
         if (!r.ok) expect(r.reason).toBe('permission_denied');
       } finally {
@@ -536,12 +536,12 @@ describe('permission errors (EACCES / EPERM)', () => {
 
   runAsNonRoot(
     'unwritable parent dir on a fresh install → permission_denied (write path)',
-    () => {
+    async () => {
       // No existing settings.json; backup is skipped; atomicWriteJson is
       // the first thing to hit EACCES.
       chmodSync(tmp, 0o500);
       try {
-        const r = install();
+        const r = await install();
         expect(r.ok).toBe(false);
         if (!r.ok) expect(r.reason).toBe('permission_denied');
       } finally {
@@ -552,12 +552,12 @@ describe('permission errors (EACCES / EPERM)', () => {
 
   runAsNonRoot(
     'uninstall on unreadable settings → permission_denied (not malformed)',
-    () => {
+    async () => {
       const p = settingsPath();
       writeFileSync(p, JSON.stringify({ hooks: {} }));
       chmodSync(p, 0o000);
       try {
-        const r = uninstall();
+        const r = await uninstall();
         expect(r.ok).toBe(false);
         if (!r.ok) expect(r.reason).toBe('permission_denied');
       } finally {
@@ -567,9 +567,79 @@ describe('permission errors (EACCES / EPERM)', () => {
   );
 });
 
+describe('concurrent writers (settings-file lock)', () => {
+  test('two concurrent installs preserve user hooks and converge to idempotent state', async () => {
+    const original = {
+      apiKeyHelper: '/usr/local/bin/my-helper',
+      hooks: {
+        UserPromptSubmit: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: 'user-prompt.sh' }],
+          },
+        ],
+      },
+    };
+    writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
+
+    const [r1, r2] = await Promise.all([install(), install()]);
+    expect(r1.ok && r2.ok).toBe(true);
+
+    const after = readJson<typeof original>(settingsPath());
+    // User key and hook survive both races.
+    expect(after.apiKeyHelper).toBe(original.apiKeyHelper);
+    expect(after.hooks.UserPromptSubmit).toEqual(
+      original.hooks.UserPromptSubmit,
+    );
+    // Each Idle event has exactly one matcher-"" hook (idempotent).
+    const settings = readJson<{
+      hooks: Record<
+        string,
+        Array<{ matcher: string; hooks: Array<{ command: string }> }>
+      >;
+    }>(settingsPath());
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find(
+        (g) => g.matcher === '',
+      )!;
+      const idleHooks = group.hooks.filter((h) =>
+        isIdleOwnedCommand(h.command),
+      );
+      expect(idleHooks, `event=${hook.event}`).toHaveLength(1);
+    }
+  });
+
+  test('concurrent install + uninstall produces a consistent final state', async () => {
+    const original = {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: 'user-prompt.sh' }],
+          },
+        ],
+      },
+    };
+    writeFileSync(settingsPath(), JSON.stringify(original, null, 2));
+
+    // Install first so uninstall has something to remove.
+    await install();
+
+    const [r1, r2] = await Promise.all([install(), uninstall()]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+
+    // The file is a valid JSON object and the user hook survives.
+    const after = readJson<typeof original>(settingsPath());
+    expect(after.hooks.UserPromptSubmit).toEqual(
+      original.hooks.UserPromptSubmit,
+    );
+  });
+});
+
 describe('async flag per event', () => {
-  test('SessionStart / PostToolUse / SessionEnd emit async: true; Stop stays synchronous', () => {
-    install();
+  test('SessionStart / PostToolUse / SessionEnd emit async: true; Stop stays synchronous', async () => {
+    await install();
     const settings = readJson<{
       hooks: Record<
         string,
