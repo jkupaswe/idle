@@ -209,13 +209,12 @@ describe('notify promise contract', () => {
     ).resolves.toBeUndefined();
   });
 
-  test('never rejects when the stderr fallback itself throws (EPIPE / closed fd)', async () => {
+  test('catch-branch fallback: exec fails AND stderr.write throws → still resolves', async () => {
+    // Exercises writeStderr path C only (no try-branch writeStderr).
+    // Darwin → execFile rejects → catch block → writeStderr(C) must not
+    // propagate its own throw.
     process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
     execFileMock.mockRejectedValue(new Error('osascript boom'));
-    // Monkey-patch stderr.write to throw — models a closed stderr or
-    // a hostile test harness. Both the happy-path stderr write (after
-    // a platform fallback) AND the catch-branch stderr write must not
-    // escape.
     stderrSpy.mockImplementation(() => {
       throw new Error('stderr boom');
     });
@@ -227,7 +226,28 @@ describe('notify promise contract', () => {
     expect(stderrSpy).toHaveBeenCalled();
   });
 
-  test('never rejects on win32 when stderr.write throws', async () => {
+  test('try-branch fallback: linux-no-notify-send AND stderr.write throws → still resolves', async () => {
+    // Exercises writeStderr path A specifically. Without the swallow:
+    //   1. `which notify-send` rejects → hasNotifySend returns false.
+    //   2. try-branch writeStderr (A) throws → bubbles to catch.
+    //   3. catch-branch writeStderr (C) also throws → escapes, rejects.
+    // With the swallow, (A) returns normally and no catch is needed.
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    execFileMock.mockRejectedValue(new Error('which: not found'));
+    stderrSpy.mockImplementation(() => {
+      throw new Error('stderr boom');
+    });
+
+    await expect(
+      notify({ title: 'Idle', body: 'linux-no-notify' }),
+    ).resolves.toBeUndefined();
+
+    // The try-branch fallback was attempted at least once.
+    expect(stderrSpy).toHaveBeenCalled();
+  });
+
+  test('other-platform fallback: win32 stderr.write throws → still resolves', async () => {
+    // Exercises writeStderr path B (no catch, no exec, fallthrough).
     process.env.IDLE_NOTIFY_PLATFORM = 'win32';
     stderrSpy.mockImplementation(() => {
       throw new Error('stderr closed');
@@ -235,5 +255,6 @@ describe('notify promise contract', () => {
     await expect(
       notify({ title: 'Idle', body: 'stub' }),
     ).resolves.toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalled();
   });
 });
