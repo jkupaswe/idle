@@ -1,0 +1,16 @@
+node_modules
+dist
+.idle-test-home
+
+# editor / OS
+.DS_Store
+*.swp
+.idea
+.vscode
+
+# logs
+*.log
+
+# env
+.env
+.env.*
