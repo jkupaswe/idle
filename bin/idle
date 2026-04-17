@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+// Entry point for the `idle` CLI.
+//
+// Registers the tsx ESM loader so `.ts` imports resolve at runtime, then
+// dispatches to src/cli.ts. There is no build step — TypeScript sources ship
+// and are executed via tsx (see CLAUDE.md "Shipping model").
+
+import { register } from 'tsx/esm/api';
+
+const unregister = register();
+try {
+  await import('../src/cli.js');
+} finally {
+  unregister();
+}
