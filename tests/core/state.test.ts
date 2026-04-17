@@ -476,6 +476,39 @@ describe('consumePendingCheckin', () => {
     const after = readState(p);
     expect(after.state.sessions[SESSION_A]).toBeUndefined();
   });
+
+  test('10 concurrent consumes against one pending checkin → exactly one wins', async () => {
+    const p = statePath();
+    await registerSession(
+      SESSION_A,
+      baseEntry({ pending_checkin: true, tool_calls_since_checkin: 50 }),
+      { path: p, timeoutMs: ms(10_000) },
+    );
+
+    const N = 10;
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        consumePendingCheckin(SESSION_A, {
+          path: p,
+          timeoutMs: ms(10_000),
+        }),
+      ),
+    );
+
+    const wins = results.filter((r) => r.ok);
+    const losses = results.filter(
+      (r) => !r.ok && r.reason === 'not_pending',
+    );
+    expect(wins).toHaveLength(1);
+    expect(losses).toHaveLength(N - 1);
+
+    // State is clean after the race: no pending flag, one checkin recorded,
+    // counters reset.
+    const entry = readState(p).state.sessions[SESSION_A];
+    expect(entry?.pending_checkin).toBe(false);
+    expect(entry?.checkins).toHaveLength(1);
+    expect(entry?.tool_calls_since_checkin).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
