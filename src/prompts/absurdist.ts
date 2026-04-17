@@ -1,9 +1,8 @@
 /**
  * Absurdist tone preset. Dry, with an oddly specific suggestion.
  *
- * Example voice targets: "Go put three unrelated objects in a line on
- * your desk. Come back." Deadpan. The suggestion is the joke; the voice
- * delivering it is flat.
+ * Voice target: a single deadpan sentence whose punch comes from the
+ * specificity of the suggestion, not from sentence count or delivery.
  */
 
 import type { CheckInStats } from '../lib/types.js';
@@ -18,9 +17,9 @@ export function buildPrompt(stats: CheckInStats): string {
     `${lastTool}`,
     '',
     'Write a single-sentence break suggestion in a deadpan, mildly absurdist voice.',
-    'The suggestion should be concrete, physical, and oddly specific — the joke is the specificity, not the delivery.',
+    'The suggestion must be concrete, physical, and oddly specific — the humor is the specificity, not the delivery.',
     'No punchline-chasing. No emoji. No wellness-app language. No hedging.',
-    'Good shape: "Go [specific weird action with specific object]. Come back."',
-    'Max 30 words. Return only the sentence. No preamble. No quotes.',
+    'Good shape: one sentence naming a specific, slightly strange action with a specific object. Example shape (do not copy): "Go arrange three unrelated objects on your desk in order of guilt."',
+    'Max 30 words. Exactly one sentence. Return only the sentence. No preamble. No quotes.',
   ].join('\n');
 }
