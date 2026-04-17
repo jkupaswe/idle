@@ -216,6 +216,15 @@ export interface SessionEntry {
   tool_calls_since_checkin: number;
   /** Total tool calls observed this session. */
   total_tool_calls: number;
+  /**
+   * Subagent tool calls since the last check-in, tracked separately so
+   * stats can break out main- vs. subagent-agent activity. Wave 2's
+   * threshold check sums `tool_calls_since_checkin +
+   * (subagent_tool_calls_since_checkin ?? 0)`.
+   */
+  subagent_tool_calls_since_checkin?: number;
+  /** Total subagent tool calls this session. Reported alongside `total_tool_calls`. */
+  total_subagent_tool_calls?: number;
   /** ISO-8601 timestamp of the last check-in, or null if none yet. */
   last_checkin_at: string | null;
   /** ISO-8601 timestamps of every check-in fired this session. */
