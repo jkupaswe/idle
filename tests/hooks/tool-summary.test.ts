@@ -1,9 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import {
-  redactSecrets,
-  summarizeToolInput,
-} from '../../src/hooks/tool-summary.js';
+import { summarizeToolInput } from '../../src/hooks/tool-summary.js';
 
 describe('summarizeToolInput — allowlist extractors', () => {
   test('Bash extracts the first non-env-assignment token', () => {
@@ -127,52 +124,5 @@ describe('summarizeToolInput — secret redaction', () => {
     const out = summarizeToolInput('Read', { file_path: path });
     expect(out).not.toContain('sk-abcdef1234567890abcdef');
     expect(out).toContain('<redacted>');
-  });
-
-  test('redacts AWS access key id', () => {
-    expect(redactSecrets('aws=AKIAIOSFODNN7EXAMPLE done')).toBe(
-      'aws=<redacted> done',
-    );
-  });
-
-  test('redacts GitHub personal access tokens', () => {
-    expect(redactSecrets('ghp_aaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe('<redacted>');
-    expect(redactSecrets('ghs_abcdefghijklmnopqrstuvwxyz')).toBe('<redacted>');
-  });
-
-  test('redacts Google API keys', () => {
-    expect(
-      redactSecrets('AIzaSyA-abcdefghijklmnopqrstuvwxyz12345'),
-    ).toBe('<redacted>');
-  });
-
-  test('redacts Slack tokens', () => {
-    expect(redactSecrets('xoxb-1234567890-abcdef')).toContain('<redacted>');
-  });
-
-  test('redacts Bearer tokens case-insensitively', () => {
-    expect(redactSecrets('Authorization: Bearer abcdef1234567890abcdef')).toBe(
-      'Authorization: Bearer <redacted>',
-    );
-    expect(redactSecrets('auth: bearer abcdef1234567890abcdef')).toMatch(
-      /Bearer <redacted>/,
-    );
-  });
-
-  test('redacts SHOUTY_CASE env-var secret assignments', () => {
-    expect(redactSecrets('PASSWORD=hunter2')).toBe('PASSWORD=<redacted>');
-    expect(redactSecrets('API_TOKEN=abcdef')).toBe('API_TOKEN=<redacted>');
-    expect(redactSecrets('SESSION_COOKIE=xxxxx')).toBe(
-      'SESSION_COOKIE=<redacted>',
-    );
-  });
-
-  test('does not redact benign key=value pairs', () => {
-    expect(redactSecrets('type=json')).toBe('type=json');
-    expect(redactSecrets('file=app.ts')).toBe('file=app.ts');
-  });
-
-  test('preserves structure when nothing matches', () => {
-    expect(redactSecrets('git status')).toBe('git status');
   });
 });

@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs';
 
 import { log } from '../lib/log.js';
 import { idleStatePath } from '../lib/paths.js';
+import { redactSecrets } from '../lib/redact.js';
 import { nowIso } from '../lib/time.js';
 import type {
   SessionEntry,
@@ -352,6 +353,14 @@ export async function consumePendingCheckin(
  * Thresholds are passed in rather than loaded here so `state.ts` stays
  * independent of `config.ts` — the hook loads config once and hands the
  * thresholds down.
+ *
+ * Defense-in-depth: `tool.name` and `tool.summary` are piped through
+ * `redactSecrets` before persistence. The Hook-layer sanitizer in
+ * `src/hooks/tool-summary.ts` already does this, but running it again
+ * here guarantees that any caller bypassing the hook (test harnesses,
+ * internal tools, future scripts) cannot stash an unredacted secret.
+ * `redactSecrets` is idempotent, so the double-pass is a no-op for
+ * properly-sanitized input.
  */
 export async function incrementToolCounter(
   id: SessionId,
@@ -364,6 +373,10 @@ export async function incrementToolCounter(
     ...options,
     timeoutMs: options.timeoutMs ?? INCREMENT_TOOL_COUNTER_TIMEOUT,
   };
+  // Redact before truncate on summary — truncating first could slice a
+  // secret pattern in half and leave the prefix unredactable.
+  const safeName = redactSecrets(tool.name);
+  const safeSummary = truncate(redactSecrets(tool.summary), 200);
   const result = await _updateState<IncrementToolResult>((state) => {
     const entry = state.sessions[id];
     if (entry === undefined) {
@@ -375,8 +388,8 @@ export async function incrementToolCounter(
 
     entry.tool_calls_since_checkin += 1;
     entry.total_tool_calls += 1;
-    entry.last_tool_name = tool.name;
-    entry.last_tool_summary = truncate(tool.summary, 200);
+    entry.last_tool_name = safeName;
+    entry.last_tool_summary = safeSummary;
 
     const totalCalls =
       entry.tool_calls_since_checkin +

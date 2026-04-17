@@ -657,4 +657,86 @@ describe('incrementToolCounter', () => {
     if (!r.ok) expect(r.reason).toBe('not_found');
     expect(readState(p).state.sessions[SESSION_A]).toBeUndefined();
   });
+
+  // F-005: the Hook-layer sanitizer in src/hooks/tool-summary.ts is the
+  // first line of defense, but any caller that hands a raw secret to
+  // `incrementToolCounter` — a test harness, an internal CLI, a future
+  // hook — must still not be able to persist it. These tests call
+  // `incrementToolCounter` directly with unredacted input and assert
+  // that what lands on disk has been scrubbed.
+  describe('defense-in-depth: redacts secrets in name and summary', () => {
+    test('redacts secret patterns in tool.summary before persistence', async () => {
+      const p = statePath();
+      await _updateState(
+        (s) => {
+          s.sessions[SESSION_A] = baseEntry();
+        },
+        { path: p },
+      );
+      const leaky =
+        'OPENAI_API_KEY=sk-abcdef1234567890abcdef ghp_aaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const r = await incrementToolCounter(
+        SESSION_A,
+        { name: 'Bash', summary: leaky },
+        THRESHOLDS,
+        { path: p },
+      );
+      expect(r.ok).toBe(true);
+
+      const entry = readState(p).state.sessions[SESSION_A];
+      const summary = entry?.last_tool_summary ?? '';
+      expect(summary).not.toContain('sk-abcdef1234567890abcdef');
+      expect(summary).not.toContain('ghp_aaaaaaaaaaaaaaaaaaaaaaaaaa');
+      expect(summary).toContain('<redacted>');
+
+      const raw = readFileSync(p, 'utf8');
+      expect(raw).not.toContain('sk-abcdef1234567890abcdef');
+      expect(raw).not.toContain('ghp_aaaaaaaaaaaaaaaaaaaaaaaaaa');
+    });
+
+    test('redacts secret patterns in tool.name before persistence', async () => {
+      const p = statePath();
+      await _updateState(
+        (s) => {
+          s.sessions[SESSION_A] = baseEntry();
+        },
+        { path: p },
+      );
+      const r = await incrementToolCounter(
+        SESSION_A,
+        { name: 'Bearer abcdef1234567890abcdef', summary: '' },
+        THRESHOLDS,
+        { path: p },
+      );
+      expect(r.ok).toBe(true);
+
+      const entry = readState(p).state.sessions[SESSION_A];
+      expect(entry?.last_tool_name).toBe('Bearer <redacted>');
+    });
+
+    test('redacts before truncating so a secret split at 200 chars is still scrubbed', async () => {
+      const p = statePath();
+      await _updateState(
+        (s) => {
+          s.sessions[SESSION_A] = baseEntry();
+        },
+        { path: p },
+      );
+      // Place the secret near the 200-char boundary so a naive
+      // truncate-then-redact order would slice the pattern mid-token.
+      const prefix = 'x'.repeat(190);
+      const summary = `${prefix} sk-abcdef1234567890abcdef tail`;
+      const r = await incrementToolCounter(
+        SESSION_A,
+        { name: 'Bash', summary },
+        THRESHOLDS,
+        { path: p },
+      );
+      expect(r.ok).toBe(true);
+
+      const entry = readState(p).state.sessions[SESSION_A];
+      expect(entry?.last_tool_summary).not.toContain('sk-abcdef');
+      expect(entry?.last_tool_summary?.length).toBeLessThanOrEqual(200);
+    });
+  });
 });
