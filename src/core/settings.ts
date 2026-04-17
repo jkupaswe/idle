@@ -59,6 +59,51 @@ export type IdleEvent = IdleHookEvent['event'];
 /** Literal script-filename union. */
 export type IdleScript = IdleHookEvent['script'];
 
+const IDLE_SCRIPTS: readonly IdleScript[] = IDLE_HOOK_EVENTS.map(
+  (h) => h.script,
+);
+
+/**
+ * True when `cmd` is structurally one of Idle's hook commands. Uses a
+ * strict three-condition check — not `cmd.includes(IDLE_TAG)`, which
+ * treats the tag as a substring anywhere in the command and removes
+ * user hooks that merely mention it:
+ *
+ * 1. Starts with the exact prefix `npx tsx ` (the only form Idle emits).
+ * 2. Ends with the exact suffix ` # idle:v1` (at end-of-string, no
+ *    trailing characters).
+ * 3. The middle — after stripping outer POSIX single-quotes that
+ *    `buildHookCommand` may add for paths with special characters —
+ *    has a basename matching one of the four Idle hook scripts.
+ *
+ * A user command like `echo keep me # idle:v1 but not idle` fails both
+ * (1) and (2); `npx tsx foo.ts # idle:v1` fails (3). Only commands Idle
+ * itself emits can slip through.
+ */
+export function isIdleOwnedCommand(cmd: string): boolean {
+  const PREFIX = 'npx tsx ';
+  const SUFFIX = ` ${IDLE_TAG}`;
+  if (!cmd.startsWith(PREFIX)) return false;
+  if (!cmd.endsWith(SUFFIX)) return false;
+
+  const middle = cmd.slice(PREFIX.length, cmd.length - SUFFIX.length);
+  const path = unquoteShellArg(middle);
+  const basename = path.split('/').pop() ?? path;
+  return IDLE_SCRIPTS.some((script) => basename === script);
+}
+
+/**
+ * Reverse POSIX single-quote escaping produced by `shellEscape` (D4).
+ * Leaves un-quoted arguments untouched. Non-POSIX shells aren't supported
+ * here — Idle only emits single-quoted output.
+ */
+function unquoteShellArg(arg: string): string {
+  if (arg.length >= 2 && arg.startsWith("'") && arg.endsWith("'")) {
+    return arg.slice(1, -1).replace(/'\\''/g, "'");
+  }
+  return arg;
+}
+
 export interface InstallOptions {
   /**
    * Absolute path to the directory containing the four hook scripts. Defaults
@@ -326,10 +371,10 @@ function removeIdleHooks(settings: SettingsFile): {
       }
       const cleanedHooks = group.hooks.filter((h) => {
         const isIdle =
-          h &&
+          h !== null &&
           typeof h === 'object' &&
           typeof h.command === 'string' &&
-          h.command.includes(IDLE_TAG);
+          isIdleOwnedCommand(h.command);
         if (isIdle) touched.add(event);
         return !isIdle;
       });

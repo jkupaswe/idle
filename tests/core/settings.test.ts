@@ -16,6 +16,7 @@ import {
   IDLE_HOOK_EVENTS,
   IDLE_TAG,
   installHooks,
+  isIdleOwnedCommand,
   uninstallHooks,
 } from '../../src/core/settings.js';
 
@@ -277,6 +278,122 @@ describe('hook command format', () => {
       );
       expect(cmd.startsWith('npx tsx ')).toBe(true);
     }
+  });
+});
+
+describe('isIdleOwnedCommand predicate', () => {
+  test('accepts Idle-emitted commands (unquoted path)', () => {
+    expect(
+      isIdleOwnedCommand(
+        `npx tsx /path/to/session-start.ts ${IDLE_TAG}`,
+      ),
+    ).toBe(true);
+    expect(
+      isIdleOwnedCommand(
+        `npx tsx /abs/path/stop.ts ${IDLE_TAG}`,
+      ),
+    ).toBe(true);
+  });
+
+  test('accepts Idle-emitted commands (single-quoted path with spaces)', () => {
+    expect(
+      isIdleOwnedCommand(
+        `npx tsx '/Users/Alice Smith/idle/hooks/post-tool-use.ts' ${IDLE_TAG}`,
+      ),
+    ).toBe(true);
+  });
+
+  test('rejects a user command that mentions the tag as a substring', () => {
+    expect(
+      isIdleOwnedCommand('echo keep me # idle:v1 but not idle'),
+    ).toBe(false);
+  });
+
+  test('rejects a user command that ends with the tag but is not ours', () => {
+    expect(
+      isIdleOwnedCommand(`bash /home/bob/mine.sh ${IDLE_TAG}`),
+    ).toBe(false);
+    expect(
+      isIdleOwnedCommand(`npx tsx /unrelated/not-idle.ts ${IDLE_TAG}`),
+    ).toBe(false);
+  });
+
+  test('rejects commands missing the prefix or suffix', () => {
+    expect(
+      isIdleOwnedCommand(`/path/to/stop.ts ${IDLE_TAG}`),
+    ).toBe(false);
+    expect(
+      isIdleOwnedCommand('npx tsx /path/to/stop.ts'),
+    ).toBe(false);
+    expect(isIdleOwnedCommand('')).toBe(false);
+  });
+
+  test('rejects trailing garbage after the tag', () => {
+    expect(
+      isIdleOwnedCommand(`npx tsx /path/stop.ts ${IDLE_TAG} oops`),
+    ).toBe(false);
+  });
+});
+
+describe('uninstall: tightened ownership detection', () => {
+  test("user hook containing the tag in its body is preserved", () => {
+    // Author's command mentions the marker text but is not Idle's.
+    const userHook = `echo "owned by me # idle:v1 but not idle"`;
+    writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: userHook }],
+            },
+          ],
+        },
+      }),
+    );
+
+    install(); // Adds Idle's Stop hook alongside the user's.
+    const result = uninstall();
+    expect(result.ok).toBe(true);
+
+    const after = readJson<{
+      hooks: {
+        Stop: Array<{ matcher: string; hooks: Array<{ command: string }> }>;
+      };
+    }>(settingsPath());
+    expect(after.hooks.Stop).toHaveLength(1);
+    expect(after.hooks.Stop[0]!.hooks[0]!.command).toBe(userHook);
+  });
+
+  test('user hook with trailing tag but wrong binary is preserved', () => {
+    const userHook = `bash /home/bob/mine.sh ${IDLE_TAG}`;
+    writeFileSync(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: userHook }],
+            },
+          ],
+        },
+      }),
+    );
+
+    install();
+    uninstall();
+
+    const after = readJson<{
+      hooks: {
+        SessionStart: Array<{
+          matcher: string;
+          hooks: Array<{ command: string }>;
+        }>;
+      };
+    }>(settingsPath());
+    expect(after.hooks.SessionStart[0]!.hooks[0]!.command).toBe(userHook);
   });
 });
 
