@@ -83,14 +83,48 @@ Core Wave 2 produced a set of primitives that every Wave 2 and later agent must 
 - **`ms(n)`** (src/lib/types.ts) — Milliseconds constructor. Validates non-negative finite; throws on invalid. Prevents seconds-vs-ms confusion.
 
 ### State (src/core/state.ts — public API)
-Use the named helpers. `_updateState` is module-private by design and is not exported.
 
-- **`readState()`** — returns `ReadStateResult` discriminated union (`fresh | empty | recovered | partial`).
-- **`registerSession(id, projectPath, disabled)`** — atomic session init.
-- **`removeSession(id)`** — atomic session deletion.
-- **`takeSessionSnapshot(id)`** — atomic read of entry (used by SessionEnd).
-- **`consumePendingCheckin(id)`** — atomic read-and-clear of pending_checkin. Use for the Stop hook's check-in logic. This helper is race-safe; do not implement check-in clearing manually.
-- **`incrementToolCounter(id, tool, thresholds)`** — atomic increment + threshold check. Defaults to 200ms timeout, fail-open (never throws on timeout). Use this for `PostToolUse`; do not reach for `readState` + custom mutation.
+Use the named helpers. `_updateState` is module-private by design and 
+is not exported.
+
+All mutating helpers accept an optional `options?: UpdateStateOptions` 
+for overriding lock timeout and state file path. Hot-path callers have 
+sensible defaults (incrementToolCounter uses 200ms fail-open); others 
+default to DEFAULT_LOCK_TIMEOUT. Read-only helpers accept a narrower 
+`Pick<UpdateStateOptions, 'path'>` — they don't need timeout or lock 
+semantics.
+
+All helpers return discriminated-result types; callers must handle 
+every variant explicitly.
+
+- **`readState(path?)`** → `ReadStateResult` 
+  (`fresh | empty | recovered | partial`). Synchronous.
+- **`registerSession(id, entry, options?)`** → `RegisterSessionResult`. 
+  Atomic session init. Caller constructs the full `SessionEntry` 
+  (see `src/lib/types.ts`). Async.
+- **`removeSession(id, options?)`** → `RemoveSessionResult`. Atomic 
+  session deletion. Async.
+- **`takeSessionSnapshot(id, options?)`** → `SnapshotResult`. 
+  Atomic read of entry. **Synchronous — do not await.** Options is 
+  `Pick<UpdateStateOptions, 'path'>` (no timeout needed for reads).
+- **`consumePendingCheckin(id, options?)`** → `ConsumePendingResult`. 
+  Atomic read-and-clear of `pending_checkin`. Use for the Stop hook's 
+  check-in logic. Race-safe; do not implement check-in clearing 
+  manually. Async.
+- **`incrementToolCounter(id, tool, thresholds, options?)`** → 
+  `IncrementToolResult`. Atomic increment + threshold check. Defaults 
+  to `ms(200)` timeout, fail-open (never throws on timeout). Use this 
+  for `PostToolUse`; do not reach for `readState` + custom mutation. 
+  Async.
+
+**Subagent tool calls are out of scope for v1.** SessionEntry has 
+optional `subagent_tool_calls_since_checkin` and 
+`total_subagent_tool_calls` fields, and the threshold check sums main 
++ subagent counters when present. However, no code path currently 
+writes the subagent counters; they remain undefined and contribute 
+zero to the threshold. Tracked as F-003 for v2 — see Follow-ups in 
+TASKS.md. Do NOT pass `isSubagent` or equivalent to 
+`incrementToolCounter`; the `ToolCall` type does not accept it.
 
 ### Settings (src/core/settings.ts — public API)
 - **`installHooks()`** — returns `InstallResult` discriminated union. Handles backup, atomic write, and file locking.

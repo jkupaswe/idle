@@ -285,7 +285,7 @@ These decisions are settled across Core Wave 2 and apply to all remaining ticket
 #### Architectural landmarks for this ticket
 
 - This hook is configured with `async: true` in settings.json (per established landmarks). The script may do brief I/O without user-visible latency concerns, but should still be efficient.
-- **Use `registerSession` from `src/core/state.ts`. Do NOT import or use `_updateState` (module-private).**
+- **Use `registerSession(id, entry, options?)` from `src/core/state.ts`. Caller constructs the full `SessionEntry` — see `src/lib/types.ts`. Do NOT import or use `_updateState` (module-private).**
 - **Use `log()` for warnings and info, not `console.log`.** Claude Code captures stdout.
 
 #### Acceptance criteria
@@ -318,14 +318,14 @@ These decisions are settled across Core Wave 2 and apply to all remaining ticket
 - This is the hot path. PRD §7 mandates `<50ms` added latency. The hook is configured `async: true`, which means Claude Code will not block on it, but the hook itself must still be efficient.
 - **Use `incrementToolCounter(sessionId, tool, thresholds)` from `src/core/state.ts`. This helper is already fail-open with a 200ms default timeout; do not override the timeout unless you have a specific reason and document it in a comment.**
 - **Do NOT call `readState` + manual mutation.** That bypasses the atomicity guarantees and creates race conditions.
-- Subagent tool calls (payloads with `agent_id` present) increment subagent counters separately. The `tool` argument to `incrementToolCounter` should include an `isSubagent: boolean` flag computed from the payload. (If this signature doesn't exist yet, coordinate with Core to add it.)
+- **Subagent tool calls are out of scope for v1 per F-003.** Pass `{ name, summary }` only to `incrementToolCounter`. The `agent_id` field in the PostToolUse payload is ignored by this hook in v1. Do NOT attempt to pass an `isSubagent` flag — `ToolCall` does not accept it.
 
 #### Acceptance criteria
 
-- Reads stdin JSON, extracts `session_id`, `tool_name`, `tool_input`, and `agent_id` (if present).
+- Reads stdin JSON, extracts `session_id`, `tool_name`, and `tool_input`.
 - Tool input summary: truncated to exactly 200 chars (not "reasonable" — exactly 200).
 - Load config via `loadConfig()` once per hook invocation. Extract thresholds.
-- Call `incrementToolCounter(sessionId, { name, summary, isSubagent }, thresholds)`. Handle the result:
+- Call `incrementToolCounter(sessionId, { name, summary }, thresholds)`. Handle the result:
   - `{ ok: true, thresholdTripped: true }`: the helper has already flagged `pending_checkin`; nothing more to do here.
   - `{ ok: true, thresholdTripped: false }`: also nothing more to do.
   - `{ ok: false, reason: 'timeout' }`: log warn and exit 0 (fail-open — this is the hot-path guarantee).
@@ -651,4 +651,26 @@ Items filed during implementation, deferred from their original tickets.
 **Origin:** T-005 round 4; re-surfaced during T-006 review
 **Description:** T-005's `state.internal.ts` has its own local `writeAllSync`; T-006 created the shared `src/lib/fs.ts` version. The T-005 version should switch to importing from `lib/fs.ts` so the two cannot drift. Small refactor, appropriate for end-of-Wave-2 polish pass.
 
-### F-003 — (placeholder for anything that surfaces during Wave 2 non-Core)
+### F-003 — Subagent tool call tracking (v2)
+**Status:** Open, v2 scope
+**Origin:** Surfaced during Wave 2 docs alignment; infrastructure already 
+shipped in T-005 strict-types recovery but no caller populates it.
+**Description:** `SessionEntry` has optional 
+`subagent_tool_calls_since_checkin` and `total_subagent_tool_calls` fields; 
+`incrementToolCounter`'s threshold check already sums them; 
+`consumePendingCheckin` already resets them on check-in. What's missing: 
+(1) `ToolCall` needs an optional `isSubagent` field, and (2) 
+`incrementToolCounter` needs to conditionally increment the subagent 
+counters when `isSubagent === true`. T-009 then detects `agent_id` in 
+the PostToolUse payload and passes `isSubagent: true` accordingly. 
+Estimated 10-20 lines of code + tests. Good v2 feature since Agent Teams 
+is gaining adoption.
+
+### F-004 — Brand `SessionEntry.project_path` as `AbsolutePath` (v1 polish)
+**Status:** Open, low priority
+**Origin:** Surfaced during Wave 2 docs alignment.
+**Description:** `SessionEntry.project_path` is typed as `string` with a 
+JSDoc comment noting it's an absolute path. Brand it as `AbsolutePath` 
+so callers cannot pass a relative path. Small refactor, catches a whole 
+class of potential bugs at compile time. Appropriate for end-of-Wave-2 
+polish.
