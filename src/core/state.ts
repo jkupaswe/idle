@@ -50,9 +50,19 @@ import {
   truncate,
 } from './state.internal.js';
 import type { UpdateStateOptions } from './state.internal.js';
+import { ms } from '../lib/types.js';
+import type { Milliseconds } from '../lib/types.js';
 
 export { DEFAULT_LOCK_TIMEOUT } from './state.internal.js';
 export type { UpdateStateOptions } from './state.internal.js';
+
+/**
+ * Default wall-clock budget for the PostToolUse hot path. The wall-clock
+ * enforcement in `_updateState` means this is a real ceiling for
+ * `incrementToolCounter`, not just a lock-acquisition retry budget: if
+ * filesystem I/O stalls past it, the call returns a timeout result.
+ */
+export const INCREMENT_TOOL_COUNTER_TIMEOUT: Milliseconds = ms(200);
 
 // ---------------------------------------------------------------------------
 // Public result unions
@@ -335,6 +345,11 @@ export async function incrementToolCounter(
   thresholds: Readonly<ThresholdsConfig>,
   options: UpdateStateOptions = {},
 ): Promise<IncrementToolResult> {
+  // Hot-path default: ms(200). Callers can still override via options.
+  const effective: UpdateStateOptions = {
+    ...options,
+    timeoutMs: options.timeoutMs ?? INCREMENT_TOOL_COUNTER_TIMEOUT,
+  };
   const result = await _updateState<IncrementToolResult>((state) => {
     const entry = state.sessions[id];
     if (entry === undefined) {
@@ -364,7 +379,7 @@ export async function incrementToolCounter(
       entry.pending_checkin = true;
     }
     return { ok: true, thresholdTripped };
-  }, options);
+  }, effective);
 
   if (!result.ok) return { ok: false, reason: 'timeout' };
   return result.value;

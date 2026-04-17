@@ -40,6 +40,37 @@ import type {
 
 export const DEFAULT_LOCK_TIMEOUT: Milliseconds = ms(5_000);
 
+// ---------------------------------------------------------------------------
+// Deadline — wall-clock timeout enforcement across every phase of a state op.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wall-clock deadline. Computed from `Date.now() + budget` at the start of
+ * an operation; checked between every subsequent phase (ensureStateFile,
+ * lock acquisition, corruption recovery, read, mutate, write, fsync,
+ * rename). If `isExpired(deadline)` at any boundary, the public helper
+ * returns `{ ok: false, reason: 'timeout' }` after releasing any held
+ * lock.
+ *
+ * Typed as a const-shaped interface rather than a bare number so nobody
+ * accidentally passes a plain `Date.now() + N` around.
+ */
+export interface Deadline {
+  readonly expiresAt: number;
+}
+
+export function makeDeadline(budget: Milliseconds): Deadline {
+  return { expiresAt: Date.now() + budget };
+}
+
+export function isExpired(deadline: Deadline): boolean {
+  return Date.now() >= deadline.expiresAt;
+}
+
+export function remainingMs(deadline: Deadline): Milliseconds {
+  return ms(Math.max(0, deadline.expiresAt - Date.now()));
+}
+
 /** Options accepted by `_updateState` and every named mutation helper. */
 export interface UpdateStateOptions {
   /** Override `~/.idle/state.json`. Used by tests. */
@@ -64,7 +95,13 @@ export type UpdateStateResult<T> =
 /**
  * Acquire the file lock, hand the mutator a mutable state, write the
  * result atomically, release. Mutator exceptions propagate; lock-timeouts
- * fold into `{ ok: false, reason: 'timeout' }`.
+ * and any phase whose completion overshoots the deadline fold into
+ * `{ ok: false, reason: 'timeout' }`.
+ *
+ * The deadline is a wall-clock ceiling, not just a lock budget. If a
+ * filesystem call stalls (slow disk, seccomp pause, network filesystem),
+ * we detect it at the next phase boundary and bail — even if the I/O
+ * itself eventually returned.
  */
 export async function _updateState<T>(
   mutator: Mutator<T>,
@@ -72,18 +109,24 @@ export async function _updateState<T>(
 ): Promise<UpdateStateResult<T>> {
   const path = options.path ?? idleStatePath();
   const timeoutMs = options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT;
+  const deadline = makeDeadline(timeoutMs);
+
+  if (isExpired(deadline)) return TIMEOUT;
 
   ensureStateFile(path);
+  if (isExpired(deadline)) return TIMEOUT;
 
-  const release = await acquireLock(path, timeoutMs);
-  if (release === null) {
-    return { ok: false, reason: 'timeout' };
-  }
+  const release = await acquireLock(path, remainingMs(deadline));
+  if (release === null) return TIMEOUT;
 
   try {
+    if (isExpired(deadline)) return TIMEOUT;
     const current = readMutableState(path);
+    if (isExpired(deadline)) return TIMEOUT;
     const value = mutator(current);
+    if (isExpired(deadline)) return TIMEOUT;
     atomicWriteFile(path, JSON.stringify(current, null, 2) + '\n');
+    if (isExpired(deadline)) return TIMEOUT;
     return { ok: true, value };
   } finally {
     try {
@@ -96,6 +139,8 @@ export async function _updateState<T>(
     }
   }
 }
+
+const TIMEOUT = { ok: false, reason: 'timeout' } as const;
 
 // ---------------------------------------------------------------------------
 // Read helpers shared by state.ts's readState and by _updateState
