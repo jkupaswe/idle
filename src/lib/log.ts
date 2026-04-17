@@ -15,6 +15,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { idleDebugLog } from './paths.js';
+import { nowIso } from './time.js';
 import type { LogLevel } from './types.js';
 
 /**
@@ -29,7 +30,7 @@ import type { LogLevel } from './types.js';
  */
 export function log(level: LogLevel, msg: string, meta?: unknown): void {
   const entry: Record<string, unknown> = {
-    ts: new Date().toISOString(),
+    ts: nowIso(),
     level,
     msg,
   };
