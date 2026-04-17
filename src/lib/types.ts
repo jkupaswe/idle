@@ -31,11 +31,59 @@ export const TONE_PRESETS: readonly TonePreset[] = [
 // ---------------------------------------------------------------------------
 // Claude Code hook payloads
 // ---------------------------------------------------------------------------
+//
+// Shapes follow the Claude Code hooks reference:
+// https://code.claude.com/docs/en/hooks
+//
+// The reference evolves, so hook scripts must still treat any field as
+// potentially absent — even ones typed as required here. All enum-style
+// fields are modeled as open string unions (literal values the docs list
+// right now, plus `string` as a fallback) so new values don't force a
+// type-level change.
+
+/**
+ * Permission mode in effect when the hook fired.
+ *
+ * Documented values: `"default" | "acceptEdits" | "bypassPermissions" | "plan"`.
+ * Modeled as an open union so Claude Code can add modes without forcing a
+ * breaking change here.
+ */
+export type PermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'bypassPermissions'
+  | 'plan'
+  | (string & {});
+
+/**
+ * How a session was launched. Documented values include
+ * `"startup" | "resume" | "clear" | "compact"`. Open union for forward-compat.
+ */
+export type SessionStartSource =
+  | 'startup'
+  | 'resume'
+  | 'clear'
+  | 'compact'
+  | (string & {});
+
+/**
+ * Why a session ended. Documented values include
+ * `"clear" | "logout" | "prompt_input_exit" | "other"`. Open union for
+ * forward-compat.
+ */
+export type SessionEndReason =
+  | 'clear'
+  | 'logout'
+  | 'prompt_input_exit'
+  | 'other'
+  | (string & {});
 
 /**
  * Fields common to every hook payload Claude Code writes to stdin.
  *
- * `hook_event_name` is the discriminator.
+ * `hook_event_name` is the discriminator for the union below.
+ *
+ * See https://code.claude.com/docs/en/hooks for the authoritative schema.
  */
 export interface HookPayloadBase {
   /** Unique ID for the Claude Code session that fired this hook. */
@@ -46,13 +94,21 @@ export interface HookPayloadBase {
   cwd: string;
   /** The hook event that fired. */
   hook_event_name: string;
+  /** Permission mode in effect when the hook fired, when present. */
+  permission_mode?: PermissionMode;
+  /** Subagent ID when the hook fired inside a subagent invocation. */
+  agent_id?: string;
+  /** Subagent type (e.g. agent name) when fired inside a subagent. */
+  agent_type?: string;
 }
 
 /** `SessionStart` fires once at the beginning of a Claude Code session. */
 export interface SessionStartPayload extends HookPayloadBase {
   hook_event_name: 'SessionStart';
   /** How the session was launched, when Claude Code exposes it. */
-  source?: string;
+  source?: SessionStartSource;
+  /** Claude model the session is using, when Claude Code exposes it. */
+  model?: string;
 }
 
 /** `PostToolUse` fires after every tool call the agent completes. */
@@ -60,6 +116,8 @@ export interface PostToolUsePayload extends HookPayloadBase {
   hook_event_name: 'PostToolUse';
   /** Name of the tool that was invoked (e.g. `"Bash"`, `"Read"`). */
   tool_name: string;
+  /** Stable identifier for this tool invocation. */
+  tool_use_id?: string;
   /** Arbitrary tool input payload. Shape varies per tool. */
   tool_input: Record<string, unknown>;
   /** Arbitrary tool response payload. Shape varies per tool. */
@@ -71,13 +129,15 @@ export interface StopPayload extends HookPayloadBase {
   hook_event_name: 'Stop';
   /** True when Claude Code is re-invoking Stop after a previous hook fired. */
   stop_hook_active?: boolean;
+  /** Text of the final assistant message for this turn, when exposed. */
+  last_assistant_message?: string;
 }
 
 /** `SessionEnd` fires when the Claude Code session terminates. */
 export interface SessionEndPayload extends HookPayloadBase {
   hook_event_name: 'SessionEnd';
   /** Reason for session termination, when Claude Code exposes it. */
-  reason?: string;
+  reason?: SessionEndReason;
 }
 
 /** Discriminated union of every hook payload Idle listens for. */
