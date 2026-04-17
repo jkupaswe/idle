@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
   IDLE_EVENTS,
+  IDLE_HOOK_EVENTS,
   IDLE_TAG,
   installHooks,
   uninstallHooks,
@@ -224,21 +225,46 @@ describe('hook command format', () => {
   test('commands include the Idle tag and point at the expected script', () => {
     install();
     const settings = readJson<{
-      hooks: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>>;
+      hooks: Record<
+        string,
+        Array<{ matcher: string; hooks: Array<{ command: string }> }>
+      >;
     }>(settingsPath());
 
-    const expected: Record<string, string> = {
-      SessionStart: 'session-start.ts',
-      PostToolUse: 'post-tool-use.ts',
-      Stop: 'stop.ts',
-      SessionEnd: 'session-end.ts',
-    };
-
-    for (const [event, script] of Object.entries(expected)) {
-      const group = settings.hooks[event]!.find((g) => g.matcher === '')!;
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
       const cmd = group.hooks.find((h) => h.command.includes(IDLE_TAG))!.command;
-      expect(cmd).toMatch(new RegExp(`${script} ${IDLE_TAG.replace('#', '\\#')}$`));
+      expect(cmd).toMatch(
+        new RegExp(`${hook.script} ${IDLE_TAG.replace('#', '\\#')}$`),
+      );
       expect(cmd.startsWith('npx tsx ')).toBe(true);
+    }
+  });
+});
+
+describe('async flag per event', () => {
+  test('SessionStart / PostToolUse / SessionEnd emit async: true; Stop stays synchronous', () => {
+    install();
+    const settings = readJson<{
+      hooks: Record<
+        string,
+        Array<{
+          matcher: string;
+          hooks: Array<{ command: string; async?: boolean }>;
+        }>
+      >;
+    }>(settingsPath());
+
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
+      const idle = group.hooks.find((h) => h.command.includes(IDLE_TAG))!;
+
+      if (hook.async) {
+        expect(idle.async, `${hook.event} must be async`).toBe(true);
+      } else {
+        // Stop: sync. Field omitted (Claude Code's default).
+        expect(idle.async).toBeUndefined();
+      }
     }
   });
 });

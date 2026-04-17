@@ -21,26 +21,43 @@ import { atomicWriteFile } from '../lib/fs.js';
 import { claudeSettingsPath } from '../lib/paths.js';
 import { timestampSuffix } from '../lib/time.js';
 
-/** Event names we register for. Matches PRD §6.4. */
-export const IDLE_EVENTS = [
-  'SessionStart',
-  'PostToolUse',
-  'Stop',
-  'SessionEnd',
-] as const;
-
-export type IdleEvent = (typeof IDLE_EVENTS)[number];
-
 /** Tag appended to every Idle-owned command so uninstall can find them. */
 export const IDLE_TAG = '# idle:v1';
 
-/** Script filename for each event. */
-const SCRIPT_FOR_EVENT: Record<IdleEvent, string> = {
-  SessionStart: 'session-start.ts',
-  PostToolUse: 'post-tool-use.ts',
-  Stop: 'stop.ts',
-  SessionEnd: 'session-end.ts',
-};
+/**
+ * Discriminated union over the four Claude Code events Idle registers for.
+ * The `async` flag and the `script` filename are locked to the event name
+ * at compile time — a string-typed "which hook is this" can't float around
+ * out of sync.
+ *
+ * `Stop` is the only synchronous hook: it runs `claude -p` and triggers the
+ * notification, so Claude Code must block on it. The other three tick
+ * counters / archive state and must never add latency to the tool-use
+ * loop.
+ */
+export type IdleHookEvent =
+  | { readonly event: 'SessionStart'; readonly async: true; readonly script: 'session-start.ts' }
+  | { readonly event: 'PostToolUse'; readonly async: true; readonly script: 'post-tool-use.ts' }
+  | { readonly event: 'Stop'; readonly async: false; readonly script: 'stop.ts' }
+  | { readonly event: 'SessionEnd'; readonly async: true; readonly script: 'session-end.ts' };
+
+/** The four event records Idle installs, in settings.json insertion order. */
+export const IDLE_HOOK_EVENTS: readonly IdleHookEvent[] = [
+  { event: 'SessionStart', async: true, script: 'session-start.ts' },
+  { event: 'PostToolUse', async: true, script: 'post-tool-use.ts' },
+  { event: 'Stop', async: false, script: 'stop.ts' },
+  { event: 'SessionEnd', async: true, script: 'session-end.ts' },
+] as const;
+
+/** Just the event names, for iteration / type-level work. */
+export const IDLE_EVENTS: readonly IdleHookEvent['event'][] =
+  IDLE_HOOK_EVENTS.map((h) => h.event);
+
+/** Literal event-name union. */
+export type IdleEvent = IdleHookEvent['event'];
+
+/** Literal script-filename union. */
+export type IdleScript = IdleHookEvent['script'];
 
 export interface InstallOptions {
   /**
@@ -107,10 +124,15 @@ export function uninstallHooks(
 // Data transforms
 // ---------------------------------------------------------------------------
 
-/** Claude Code hook-command shape. */
+/**
+ * Claude Code hook-command shape. `async: true` makes Claude Code fire the
+ * handler in the background; omitting the field (or `false`) makes it
+ * block on completion. Idle uses async for every event except Stop.
+ */
 interface HookCommand {
   type: 'command';
   command: string;
+  async?: boolean;
   [extra: string]: unknown;
 }
 
@@ -130,13 +152,19 @@ function addIdleHooks(
   const cleaned = removeIdleHooks(settings).next;
   const hooks = { ...(cleaned.hooks ?? {}) };
 
-  for (const event of IDLE_EVENTS) {
-    const groups = [...(hooks[event] ?? [])];
+  for (const hook of IDLE_HOOK_EVENTS) {
+    const groups = [...(hooks[hook.event] ?? [])];
     const idx = groups.findIndex((g) => g.matcher === '');
-    const idleCmd: HookCommand = {
-      type: 'command',
-      command: commandFor(event, hooksDir),
-    };
+    const idleCmd: HookCommand = hook.async
+      ? {
+          type: 'command',
+          command: commandFor(hook, hooksDir),
+          async: true,
+        }
+      : {
+          type: 'command',
+          command: commandFor(hook, hooksDir),
+        };
     if (idx === -1) {
       groups.push({ matcher: '', hooks: [idleCmd] });
     } else {
@@ -146,7 +174,7 @@ function addIdleHooks(
         hooks: [...(existing.hooks ?? []), idleCmd],
       };
     }
-    hooks[event] = groups;
+    hooks[hook.event] = groups;
   }
 
   return { ...cleaned, hooks };
@@ -201,8 +229,8 @@ function removeIdleHooks(settings: SettingsFile): {
   return { next, removed };
 }
 
-function commandFor(event: IdleEvent, hooksDir: string): string {
-  const script = resolve(hooksDir, SCRIPT_FOR_EVENT[event]);
+function commandFor(hook: IdleHookEvent, hooksDir: string): string {
+  const script = resolve(hooksDir, hook.script);
   return `npx tsx ${script} ${IDLE_TAG}`;
 }
 
