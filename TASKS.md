@@ -86,6 +86,22 @@ This document defines the agent fleet, the ticket dependency graph, and individu
 
 ---
 
+## Established architecture landmarks
+
+These decisions are settled across Core Wave 2 and apply to all remaining tickets. They are documented here and in CLAUDE.md. Tickets below assume these as baseline; do not re-decide them during implementation.
+
+- **Shipping model:** Idle ships TypeScript sources. Hooks execute via `npx tsx`. No compiled `dist/` at runtime. Installed command format: `npx tsx /abs/path/src/hooks/<n>.ts # idle:v1`.
+- **Hook ownership:** Strict three-condition `isIdleOwnedCommand` predicate in `src/core/settings.ts`. No substring matching.
+- **Async hook flags:** SessionStart/PostToolUse/SessionEnd are `async: true`; Stop is sync.
+- **Never-throw primitives:** `log()` and `notify()` contractually never throw. Callers do not wrap.
+- **State access:** Use named helpers in `src/core/state.ts` (readState, registerSession, removeSession, takeSessionSnapshot, consumePendingCheckin, incrementToolCounter). Raw `_updateState` is module-private.
+- **Settings access:** Use `installHooks()` / `uninstallHooks()` from `src/core/settings.ts`. Both return discriminated-result types.
+- **Config access:** Use `loadConfig()` (strict, throws on schema violation), `saveConfig()` (creates directory as needed), `validateConfig()`. Error classes are `ConfigParseError`, `ConfigValidationError`.
+- **Filesystem safety:** Use `writeAllSync` and `atomicWriteFile` from `src/lib/fs.ts`. Never raw `fs.writeSync` on user files.
+- **Time formatting:** Use `nowIso()` and `timestampSuffix()` from `src/lib/time.ts`.
+
+---
+
 ## Dependency graph
 
 ```
@@ -266,13 +282,27 @@ This document defines the agent fleet, the ticket dependency graph, and individu
 
 **Description:** Hook script that runs at session start. Reads JSON from stdin, initializes session state.
 
-**Acceptance:**
-- Reads full stdin as JSON. Parses `session_id` and `cwd`.
-- Calls `updateState` to add a session entry: `{ started_at: now(), project_path: cwd, tool_calls_since_checkin: 0, total_tool_calls: 0, last_checkin_at: null, checkins: [] }`.
-- Checks config for a per-project override; if the project is disabled, sets `disabled: true` on the session entry.
-- Exits 0 on success, 0 with stderr warning on non-fatal issues.
-- Never outputs anything to stdout (Claude Code uses stdout for JSON protocol).
-- Test: feed fixtures, assert state changes, assert exits 0, assert no stdout.
+#### Architectural landmarks for this ticket
+
+- This hook is configured with `async: true` in settings.json (per established landmarks). The script may do brief I/O without user-visible latency concerns, but should still be efficient.
+- **Use `registerSession` from `src/core/state.ts`. Do NOT import or use `_updateState` (module-private).**
+- **Use `log()` for warnings and info, not `console.log`.** Claude Code captures stdout.
+
+#### Acceptance criteria
+
+- Reads full stdin as JSON. Parses `session_id` and `cwd` using the Claude Code payload types from `src/lib/types.ts`.
+- Validates `session_id` via `isSessionId` before use. If invalid, log and exit 0 (do not crash the session).
+- Validates `cwd` via `isAbsolutePath` / `asAbsolutePath`. If invalid, log and exit 0.
+- Calls `registerSession(sessionId, cwd, disabled)` where `disabled` is determined by checking config's per-project override for `cwd`.
+- Exits 0 on success. Exits 0 with debug-logged warning on any non-fatal issue.
+- Never outputs anything to stdout.
+- Test: feed fixtures, assert state changes via `readState`, assert exits 0, assert no stdout, assert debug log entries on invalid input.
+
+#### What NOT to do
+
+- Do not implement session entry creation by hand via raw state access.
+- Do not log to stdout or stderr directly — use `log()`.
+- Do not throw on malformed input — log and exit 0.
 
 ---
 
@@ -281,38 +311,100 @@ This document defines the agent fleet, the ticket dependency graph, and individu
 **Depends on:** T-004, T-005
 **Files:** `src/hooks/post-tool-use.ts`, `tests/hooks/post-tool-use.test.ts`, `tests/fixtures/post-tool-use-*.json`
 
-**Description:** Fires after every tool call. Increments counters, flags pending check-in if thresholds crossed.
+**Description:** Fires after every tool call. Increments counters via the fail-open counter helper.
 
-**Acceptance:**
-- Reads stdin JSON, extracts `session_id`, `tool_name`, `tool_input`.
-- Calls `updateState`: increments `tool_calls_since_checkin` and `total_tool_calls` for this session. Records `last_tool_name` and a summary of `tool_input` (truncated to 200 chars).
-- Checks thresholds from config. If either trips, sets `pending_checkin: true` on the session entry.
-- Exits 0. No stdout.
-- Short-circuit: if session entry has `disabled: true`, exit 0 immediately.
-- Must complete in <50ms typical. Skip any work beyond counter updates.
-- Tests: fixture with 41 sequential invocations (crosses default 40 threshold), assert `pending_checkin` set after 41st. Fixture with disabled session, assert no state change.
+#### Architectural landmarks for this ticket
+
+- This is the hot path. PRD §7 mandates `<50ms` added latency. The hook is configured `async: true`, which means Claude Code will not block on it, but the hook itself must still be efficient.
+- **Use `incrementToolCounter(sessionId, tool, thresholds)` from `src/core/state.ts`. This helper is already fail-open with a 200ms default timeout; do not override the timeout unless you have a specific reason and document it in a comment.**
+- **Do NOT call `readState` + manual mutation.** That bypasses the atomicity guarantees and creates race conditions.
+- Subagent tool calls (payloads with `agent_id` present) increment subagent counters separately. The `tool` argument to `incrementToolCounter` should include an `isSubagent: boolean` flag computed from the payload. (If this signature doesn't exist yet, coordinate with Core to add it.)
+
+#### Acceptance criteria
+
+- Reads stdin JSON, extracts `session_id`, `tool_name`, `tool_input`, and `agent_id` (if present).
+- Tool input summary: truncated to exactly 200 chars (not "reasonable" — exactly 200).
+- Load config via `loadConfig()` once per hook invocation. Extract thresholds.
+- Call `incrementToolCounter(sessionId, { name, summary, isSubagent }, thresholds)`. Handle the result:
+  - `{ ok: true, thresholdTripped: true }`: the helper has already flagged `pending_checkin`; nothing more to do here.
+  - `{ ok: true, thresholdTripped: false }`: also nothing more to do.
+  - `{ ok: false, reason: 'timeout' }`: log warn and exit 0 (fail-open — this is the hot-path guarantee).
+  - `{ ok: false, reason: 'disabled' | 'not_found' }`: log debug and exit 0.
+- Exits 0. No stdout. Must complete in <50ms typical via the fail-open timeout.
+
+#### What NOT to do
+
+- Do not bypass `incrementToolCounter` by reading state and mutating directly.
+- Do not extend the timeout beyond the helper's default without explicit justification.
+- Do not block on any I/O other than the state update.
 
 ---
 
-### T-010: Stop hook (Hooks)
+### T-010: Stop hook with prompt output (Hooks)
 
-**Depends on:** T-004, T-005, T-007, T-012 (prompt templates)
+**Depends on:** T-004, T-005, T-007, T-012
 **Files:** `src/hooks/stop.ts`, `tests/hooks/stop.test.ts`, `tests/fixtures/stop-*.json`
 
-**Description:** Fires when the agent stops responding. If a check-in is pending, generates a one-sentence break suggestion via `claude -p` and fires a notification. No second, prompt-type hook — a single `command`-type Stop hook does everything. This keeps `SessionEntry` free of a transient pending-prompt field and removes the marker-file handoff. (Resolved 2026-04-16 after Wave 1 review.)
+**Description:** Fires when the agent stops responding. If a check-in is pending, generates a break suggestion via `claude -p` and triggers a native notification.
 
-Implementation sketch:
-- The command-type Stop hook reads state, decides if a check-in is needed, and if so generates the final break suggestion by invoking `claude -p "<filled-prompt>"` in a subshell. It then calls `notify()` directly.
+#### Required: design doc before implementation
 
-**Acceptance:**
-- Reads stdin JSON, extracts `session_id`.
-- If session is disabled or no `pending_checkin`, exits 0 silently.
-- Otherwise: loads config for tone preset, loads appropriate prompt template from `src/prompts/`, fills it with session stats, invokes `claude -p "<filled-prompt>"` via child process with a 15s timeout, captures stdout, trims to a single line.
-- Calls `notify({ title: "Idle", body: <suggestion> })`.
-- Updates state: `tool_calls_since_checkin = 0`, `last_checkin_at = now()`, append to `checkins`, clear `pending_checkin`.
-- Exits 0. No stdout.
-- Graceful degradation: if `claude -p` fails or times out, fall back to the `silent` preset output (bare stats line).
-- Tests: fixture with pending check-in, mock `child_process.exec` to return a suggestion, assert notify called with correct body, assert state reset. Fixture with no pending check-in, assert no-op.
+**This ticket has enough architectural complexity that the agent MUST produce a one-page design doc before writing code. Post it as a PR draft or inline in the PR description.** The design doc covers:
+
+- Proposed entry-point structure (main function + helpers)
+- Exact `claude -p` invocation pattern (see below for the settled decisions)
+- Prompt construction: how template selection works, how stats are filled in
+- Timeout handling, fallback path
+- Error handling at each boundary
+- Test matrix
+
+Reviewer approves the design, then implementation proceeds.
+
+#### Architectural landmarks for this ticket
+
+This ticket composes several established primitives. The specific composition is:
+
+1. **Child process invocation:** Use `child_process.execFile('claude', ['-p', prompt], options)` — **NOT `spawn` or `exec`**. `execFile` prevents shell injection when the prompt contains shell metacharacters (which LLM-generated content can).
+2. **Auth inheritance:** The spawned `claude` process inherits the user's environment. Pass `env: process.env` explicitly and set `timeout: 15000` (15 seconds) in the `execFile` options.
+3. **State reset:** Use `consumePendingCheckin(sessionId)` from `src/core/state.ts`. This helper is atomic and race-safe. Do NOT manually read state, clear the `pending_checkin` flag, and write back — that reintroduces the race the helper was built to solve.
+4. **Notification:** Use `notify({ title, body })` from `src/core/notify.ts`. This is never-throw; do not wrap in try/catch.
+5. **Prompt templates:** Load from `src/prompts/<tone>.ts` based on the configured tone preset. Each template exports a `buildPrompt(stats)` function (per T-012).
+6. **Silent preset:** If `config.tone.preset === 'silent'`, skip the `claude -p` call entirely and pass the template's direct output string to `notify()`.
+7. **Shipping model:** The hook is invoked as `npx tsx src/hooks/stop.ts # idle:v1`. Do not assume any compiled artifact exists.
+
+#### Flow (for the design doc to elaborate)
+
+1. Read stdin JSON, extract `session_id` and any other relevant fields.
+2. Validate `session_id` via `isSessionId`. On failure, log and exit 0.
+3. Call `consumePendingCheckin(sessionId)`. Handle the discriminated result:
+   - `{ ok: true, entry, cleared: true }`: proceed to step 4.
+   - `{ ok: false, reason: 'not_pending' | 'not_found' | 'disabled' }`: exit 0 silently (no check-in needed).
+4. Load config. Select tone preset.
+5. Build prompt using `buildPrompt(stats)` from the selected template.
+6. If tone is `silent`: pass the template's output directly to `notify()`. Done.
+7. Otherwise: invoke `execFile('claude', ['-p', prompt], { env, timeout: 15000 })`. Capture stdout.
+8. Trim stdout to a single line. Pass to `notify({ title: 'Idle', body: trimmedOutput })`.
+9. On any failure in step 7 (timeout, non-zero exit, stderr noise): fall back to the silent preset's output. Log the failure to debug. Pass fallback to `notify()`.
+10. Return (hook completes).
+
+#### Acceptance criteria
+
+- Design doc posted before implementation and approved.
+- Stop hook is configured with `async: false` in settings.json (per established landmarks — it must complete before the session truly ends, so the notification appears at the right moment).
+- All state mutation goes through `consumePendingCheckin`. No raw state access.
+- `execFile` used (not `spawn`, not `exec`). 15-second timeout. Env inherited.
+- Silent preset short-circuits the LLM call.
+- Fallback path: `claude -p` failure triggers silent-preset output, logs to debug, still calls `notify()` so the user gets *some* signal.
+- Tests cover: happy path with mocked `execFile`, timeout, non-zero exit, silent preset, not-pending short-circuit, invalid session_id.
+- Must complete in reasonable time under normal conditions. A 15s `claude -p` call is acceptable; beyond that, the timeout fires and fallback is used.
+
+#### What NOT to do
+
+- Do not use `spawn` or `exec`. Shell injection is a real risk with LLM-generated content.
+- Do not manually manage `pending_checkin`. Use the helper.
+- Do not wrap `notify()` or `log()` in try/catch. They are never-throw.
+- Do not introduce a two-hook design (earlier PRD iterations referenced this; it is superseded).
+- Do not write the prompt to a temp file unless you have a specific reason and document why.
 
 ---
 
@@ -323,12 +415,25 @@ Implementation sketch:
 
 **Description:** Fires at session end. Writes summary to disk, removes session from live state.
 
-**Acceptance:**
+#### Architectural landmarks for this ticket
+
+- This hook is configured with `async: true` in settings.json.
+- **Use `takeSessionSnapshot(sessionId)` and `removeSession(sessionId)` from `src/core/state.ts`.** Do NOT use raw state access.
+- **Use `atomicWriteFile` from `src/lib/fs.ts`** to write the summary file. Do not use raw `fs.writeFileSync`.
+
+#### Acceptance criteria
+
 - Reads stdin JSON, extracts `session_id`.
-- Reads the session entry from state, writes it to `~/.idle/sessions/<session_id>.json`.
-- Removes the entry from live state.
+- Calls `takeSessionSnapshot(sessionId)`:
+  - `{ ok: true, snapshot }`: write snapshot to `~/.idle/sessions/<session_id>.json` via `atomicWriteFile`, then call `removeSession(sessionId)`.
+  - `{ ok: false, reason: 'not_found' }`: log debug, exit 0.
 - Exits 0. No stdout.
-- Tests: fixture round-trip, verify summary file created and state entry removed.
+- Tests: fixture round-trip, verify summary file created (byte-identical to snapshot), verify state entry removed.
+
+#### What NOT to do
+
+- Do not use raw `fs.writeFileSync` for the summary file.
+- Do not call `readState` + manual deletion.
 
 ---
 
@@ -355,11 +460,27 @@ Implementation sketch:
 
 **Description:** Main CLI dispatcher using `commander`. Registers all subcommands. Prints top-level help.
 
-**Acceptance:**
-- `bin/idle` is a shebang script: `#!/usr/bin/env node` followed by `import('../dist/cli.js')` — or during dev, points to tsx.
+#### Architectural landmarks for this ticket
+
+- **Shipping model:** `bin/idle` must work without a build step. Two acceptable patterns:
+  - Pattern A (preferred): `#!/usr/bin/env -S npx tsx` shebang, dispatching directly to `src/cli.ts`. Simple but slightly slow on cold start.
+  - Pattern B: Small JS shim that `require()`s `tsx` and dispatches. More robust across environments.
+  - **Pattern B is what we'll use.** It avoids `env -S` portability concerns and gives cleaner error messages if `tsx` is missing.
+- **Do not produce a `dist/cli.js`.** There is no build step. The `bin/idle` JS shim is the entry point; `src/cli.ts` is the actual code.
+
+#### Acceptance criteria
+
+- `bin/idle` is a JS file (not TS): starts with `#!/usr/bin/env node`, registers `tsx` via `require('tsx/cjs')` or equivalent modern pattern, then imports/runs `src/cli.ts`.
+- `bin/idle` is marked executable (`chmod +x`) either via a postinstall script or by committing it with the executable bit set.
 - `idle --help` lists all subcommands with one-line descriptions matching the Idle voice.
-- `idle --version` prints package version.
-- Subcommands not yet implemented stub to a "not implemented" error.
+- `idle --version` prints package version from `package.json`.
+- Subcommands not yet implemented stub to a "not implemented" error with exit code 1.
+- Subcommands route to files in `src/commands/`, not inlined in `src/cli.ts`.
+
+#### What NOT to do
+
+- Do not introduce a build step or compilation target.
+- Do not inline subcommand logic in `cli.ts`.
 
 ---
 
@@ -368,14 +489,40 @@ Implementation sketch:
 **Depends on:** T-004, T-006, T-013
 **Files:** `src/commands/init.ts`, `src/commands/install.ts`, `src/commands/uninstall.ts`, tests
 
-**Description:** Three commands that together handle the install lifecycle.
+**Description:** Three commands that together handle the install lifecycle. This ticket also resolves follow-up **F-001** (package.json / bin / tarball-shape).
 
-**Acceptance:**
-- `idle init`: interactive. Uses `prompts` library. Asks for: tone preset (select from 4), time threshold (number, default 45), tool call threshold (number, default 40), notification method (select from 3). Confirms before writing. On confirm: calls `saveConfig()`, then `installHooks()`. Prints success + next-steps in Idle voice.
-- `idle install [--defaults]`: same as init but non-interactive. Uses flags or defaults.
-- `idle uninstall [--purge]`: calls `uninstallHooks()`. If `--purge`, also removes `~/.idle/`. Prints what was removed and path of backup file.
-- All three refuse to run and print a helpful error if `~/.claude/` is missing.
-- Tests: spawn each command in a sandboxed `IDLE_HOME`, assert files created/removed correctly.
+#### Architectural landmarks for this ticket
+
+- **Shipping model:** Installing hooks means calling `installHooks()` from `src/core/settings.ts`. That helper already handles file locking, atomic writes, backups, and `isIdleOwnedCommand` invariants. Do not replicate any of that logic.
+- **The `bin/idle` entry point and `package.json` "bin" field are restored in this ticket (F-001).** Concretely:
+  - `bin/idle` JS shim is created (per T-013's pattern — they may be done together).
+  - `package.json` has `"bin": { "idle": "./bin/idle" }`.
+  - `package.json` `files` allowlist includes `bin`, `src`, `README.md`, `LICENSE`.
+  - A new test file `tests/core/package.test.ts` asserts that `npm pack --dry-run` output includes every path referenced in `package.json`'s `bin`, `main`, `exports`, and `files` fields. This test runs in CI going forward.
+- **Install and uninstall results:** `installHooks()` and `uninstallHooks()` return discriminated-result types. The CLI commands pattern-match on these and print user-facing messages matching the Idle voice:
+  - `installHooks()` success with `backupPath`: "Installed. Previous settings backed up to \<path\>."
+  - `installHooks()` success with `backupPath: null`: "Installed."
+  - `installHooks()` failure with `reason: 'claude_not_installed'`: "Claude Code not found. Install it first: \<URL\>."
+  - `installHooks()` failure with `reason: 'permission_denied'`: "Cannot write to ~/.claude/settings.json: \<detail\>."
+  - `uninstallHooks()` success with `fileExisted: false`: "No Claude Code settings file found; nothing to uninstall."
+  - `uninstallHooks()` success with `removedEvents: []` but `fileExisted: true`: "No Idle hooks found in settings.json."
+  - `uninstallHooks()` success with removed events: "Uninstalled. Previous settings backed up to \<path\>."
+
+#### Acceptance criteria
+
+- `idle init` interactive TUI using the `prompts` library (already in deps). Asks for: tone preset (select from 4), time threshold (number, default 45), tool call threshold (number, default 40), notification method (select from 3). Confirms before writing. On confirm: calls `saveConfig()`, then `installHooks()`. Prints result messages per above.
+- `idle install [--defaults]` non-interactive equivalent.
+- `idle uninstall [--purge]`: calls `uninstallHooks()`. If `--purge`, also removes `~/.idle/` directory. Prints result messages per above.
+- All three refuse to run with a helpful error if `~/.claude/` is missing.
+- `bin/idle` is created and executable. `package.json` bin field restored. Tarball test passes.
+- Tests: spawn each command in a sandboxed `IDLE_HOME` and a sandboxed `CLAUDE_HOME`, assert files created/removed correctly, assert output strings match the voice.
+
+#### What NOT to do
+
+- Do not reimplement install/uninstall logic. Use `installHooks()` and `uninstallHooks()`.
+- Do not introduce a build step for `bin/idle`.
+- Do not use a TUI library other than `prompts`.
+- Do not print cheerful or preachy messages. Match the Idle voice.
 
 ---
 
@@ -386,13 +533,18 @@ Implementation sketch:
 
 **Description:** Read-only and config-toggle commands.
 
-**Acceptance:**
-- `idle stats [--today | --all | --session <id>]`: reads `~/.idle/sessions/*.json` and live state, prints aggregate stats. Default view: active session or most recent session.
-- Output format for stats: terse table in the Idle voice. No emoji, no color except for "active" indicator.
-- `idle status`: shows install status (hooks registered? config present? current-project enabled?). Green/red based on each check.
-- `idle disable`: uses `pwd`, updates config to mark current project disabled. Prints confirmation.
-- `idle enable`: inverse.
-- Tests per command with fixture state and sandboxed IDLE_HOME.
+#### Architectural landmarks for this ticket
+
+- **Use `readState()` from `src/core/state.ts`.** Handle all four `ReadStateResult` variants (`fresh`, `empty`, `recovered`, `partial`) — `recovered` and `partial` should surface a user-visible note about the backup path.
+- **`idle disable` and `idle enable` read `process.cwd()` and validate via `asAbsolutePath`.** If the validation throws, print a clean error — don't crash.
+- **Use `loadConfig()` and `saveConfig()`** for config reads and writes. No raw TOML manipulation.
+
+#### Acceptance criteria (existing) + these additions
+
+- `idle stats` output handles the `partial` and `recovered` variants: "Note: N malformed session entries were backed up to \<path\>."
+- `idle disable` validates `process.cwd()` is absolute before writing to config.
+- `idle enable` same.
+- All output matches Idle voice. No emoji. Terse table format for stats.
 
 ---
 
@@ -403,27 +555,38 @@ Implementation sketch:
 
 **Description:** Diagnostic command that reports health.
 
-**Acceptance:**
-- Checks: Claude Code present (binary on PATH), `~/.claude/` exists, `~/.claude/settings.json` readable, Idle hooks registered in settings.json, Idle config valid, Idle state readable, notification tool present (osascript on mac / notify-send on linux), tsx resolvable (so hooks can actually run).
-- Each check prints pass/fail with a one-line explanation.
+#### Architectural landmarks for this ticket
+
+- **Output format:** One line per check. `[ok]` or `[fail]` prefix. No emoji. No color except dim for explanatory sub-lines. Voice: terse, diagnostic.
+- Example:
+  ```
+  [ok]   Claude Code installed at /usr/local/bin/claude
+  [ok]   ~/.claude/settings.json readable
+  [ok]   Idle hooks registered (4)
+  [ok]   Idle config valid
+  [fail] Notification tool unavailable (notify-send not on PATH)
+         Install via: sudo apt install libnotify-bin
+  ```
+
+#### Acceptance criteria (existing) + these additions
+
+- Output format per above.
 - Exit code 0 if all pass, 1 if any fail.
-- Fail messages include the specific next step (e.g. "Run `idle install` to register hooks").
-- Tests: each individual check mockable.
+- Each fail message includes a specific next step.
+- Tests: each check mockable independently.
 
 ---
 
-### T-017: bin/idle + build config (CLI, small)
+### T-017: bin/idle + build config (CLI) — MERGED INTO T-014
 
-**Depends on:** T-013
-**Files:** `bin/idle`, build scripts in `package.json`
+**Note:** Much of T-017's original scope (creating `bin/idle`, package.json bin field, tarball shape) is now part of T-014 (F-001 resolution). T-017 shrinks to a verification ticket.
 
-**Description:** Ensure the CLI is runnable both in dev (via tsx) and after install (via built dist/).
+**Files:** none new
 
 **Acceptance:**
-- `npm run build` produces `dist/cli.js` and keeps import paths working (ESM).
-- `bin/idle` resolves correctly when installed globally via npm.
-- `npx tsx src/cli.ts --help` works in dev.
-- `npm link` + `idle --help` works as end-user sanity check.
+- `npm link && idle --help` works as a manual sanity check.
+- `npm pack --dry-run` tarball shape test (added in T-014) passes in CI.
+- If T-014 landed these correctly, T-017 is a no-op ticket that gets closed as "subsumed by T-014."
 
 ---
 
@@ -476,33 +639,16 @@ Implementation sketch:
 
 ## Follow-ups
 
-### F-001: `npm pack --dry-run` tarball is unusable (Architect / T-017)
+Items filed during implementation, deferred from their original tickets.
 
-**Raised by:** gpt-review-5 on PR #4 (T-006).
+### F-001 — Package tarball shape and bin/idle restoration
+**Status:** Resolved by T-014
+**Origin:** T-006 round 2 Codex review; deferred per decision; also flagged during T-007 review (not T-007 scope)
+**Description:** `package.json` declared `./bin/idle` but the file didn't exist; `files` allowlist referenced paths that weren't shipping. T-014 creates `bin/idle`, restores the `bin` field, and adds a `tests/core/package.test.ts` that runs `npm pack --dry-run` and asserts all declared paths are present.
 
-**What's wrong:** `package.json` declares `"bin": { "idle": "./bin/idle" }` and whitelists `["bin", "src", "README.md", "LICENSE"]` in `files`, but the repo does not contain `bin/idle` and `dist/` isn't in the whitelist either. A `npm pack` tarball on any current branch ships only `.ts` source — no executable, no compiled runtime. Publishing as-is would fail at `npm install -g`.
+### F-002 — Consolidate writeAllSync in lib/fs.ts
+**Status:** Open, low priority
+**Origin:** T-005 round 4; re-surfaced during T-006 review
+**Description:** T-005's `state.internal.ts` has its own local `writeAllSync`; T-006 created the shared `src/lib/fs.ts` version. The T-005 version should switch to importing from `lib/fs.ts` so the two cannot drift. Small refactor, appropriate for end-of-Wave-2 polish pass.
 
-**Why this isn't T-006's scope:** settings.ts and its runtime path resolution already ship correctly with src/-only (verified by T-006 round-5 H1 fix: `resolveHooksDirFromModule` always lands at `<pkg>/src/hooks/`, and `npx tsx` executes the `.ts` sources directly). The missing piece is the CLI entrypoint, which is T-013 / T-017.
-
-**Needs:**
-- `bin/idle` shebang script (T-013).
-- `package.json` bin + files sanity pass once T-013 + T-017 land: either ship `dist/` and point `bin/idle` at `dist/cli.js`, or keep the tarball source-only and point `bin/idle` at `src/cli.ts` via `npx tsx`. PRD §8 suggests the latter for hooks; the same pattern is viable for the CLI entrypoint.
-- Re-run `npm pack --dry-run` after T-017 to verify.
-
-### F-003: verify CI container runs tests as non-root (Architect / CI)
-
-**Raised by:** post-round-5 verification pass on PR #4.
-
-**What's wrong:** The permission-error tests in `tests/core/settings.test.ts` self-skip when `process.getuid() === 0` — chmod 0o000 doesn't simulate EACCES for root, so the tests would emit a false pass if they ran. Local dev (uid 501) runs them for real.
-
-**Needs:** confirm the CI workflow spawns tests under a non-root uid before v1 ship. If CI runs in a Docker image as root, either (a) run the test step under a non-root user (`USER node` or equivalent), or (b) add a workflow step that asserts `id -u != 0` before `npm test`. Otherwise the permission_denied paths are unverified on merge.
-
----
-
-### F-002: share `writeAllSync` across state.internal.ts and settings.ts (Core)
-
-**Raised by:** gpt-review-4 / D5 on PR #4 (T-006).
-
-**What's wrong:** T-005's `state.internal.ts` has a local `writeAllSync` implementation; T-006 added the canonical one in `src/lib/fs.ts`. Two implementations means two places to drift.
-
-**Needs:** when T-005's PR (#7) merges, drop state.internal.ts's local copy and import from `src/lib/fs.ts`. Small, mechanical change. See the CLAUDE.md "Shared safety primitives" section for the convention.
+### F-003 — (placeholder for anything that surfaces during Wave 2 non-Core)
