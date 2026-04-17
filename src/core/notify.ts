@@ -105,8 +105,20 @@ async function hasNotifySend(): Promise<boolean> {
   }
 }
 
+/**
+ * Write the notification text to stderr, swallowing any error. The module
+ * contract promises `notify()` never rejects — a stderr write that throws
+ * (closed descriptor, EPIPE, monkey-patched host) must not propagate. The
+ * previous implementation let the second-chance `writeStderr` inside the
+ * top-level `catch` escape, which rejected the promise.
+ */
 function writeStderr(title: string, body: string): void {
-  process.stderr.write(`${title}: ${body}\n`);
+  try {
+    process.stderr.write(`${title}: ${body}\n`);
+  } catch {
+    // Intentionally empty. Losing a notification line is better than
+    // breaking a Claude Code session.
+  }
 }
 
 function currentPlatform(): NodeJS.Platform | string {

@@ -177,4 +177,32 @@ describe('notify promise contract', () => {
       notify({ title: 'Idle', body: 'anything' }),
     ).resolves.toBeUndefined();
   });
+
+  test('never rejects when the stderr fallback itself throws (EPIPE / closed fd)', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockRejectedValue(new Error('osascript boom'));
+    // Monkey-patch stderr.write to throw — models a closed stderr or
+    // a hostile test harness. Both the happy-path stderr write (after
+    // a platform fallback) AND the catch-branch stderr write must not
+    // escape.
+    stderrSpy.mockImplementation(() => {
+      throw new Error('stderr boom');
+    });
+
+    await expect(
+      notify({ title: 'Idle', body: 'anything' }),
+    ).resolves.toBeUndefined();
+
+    expect(stderrSpy).toHaveBeenCalled();
+  });
+
+  test('never rejects on win32 when stderr.write throws', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'win32';
+    stderrSpy.mockImplementation(() => {
+      throw new Error('stderr closed');
+    });
+    await expect(
+      notify({ title: 'Idle', body: 'stub' }),
+    ).resolves.toBeUndefined();
+  });
 });
