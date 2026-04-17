@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import {
+  buildHookCommand,
   IDLE_EVENTS,
   IDLE_HOOK_EVENTS,
   IDLE_TAG,
@@ -261,7 +262,7 @@ describe('uninstallHooks', () => {
 });
 
 describe('hook command format', () => {
-  test('commands include the Idle tag and point at the expected script', () => {
+  test('commands are single-quoted, include the Idle tag, and point at the expected script', () => {
     install();
     const settings = readJson<{
       hooks: Record<
@@ -273,10 +274,13 @@ describe('hook command format', () => {
     for (const hook of IDLE_HOOK_EVENTS) {
       const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
       const cmd = group.hooks.find((h) => h.command.includes(IDLE_TAG))!.command;
+      // Expect: `npx tsx '<abspath/<script>' # idle:v1`
       expect(cmd).toMatch(
-        new RegExp(`${hook.script} ${IDLE_TAG.replace('#', '\\#')}$`),
+        new RegExp(`${hook.script}' ${IDLE_TAG.replace('#', '\\#')}$`),
       );
-      expect(cmd.startsWith('npx tsx ')).toBe(true);
+      expect(cmd.startsWith('npx tsx \'')).toBe(true);
+      // And the predicate recognizes it.
+      expect(isIdleOwnedCommand(cmd)).toBe(true);
     }
   });
 });
@@ -394,6 +398,79 @@ describe('uninstall: tightened ownership detection', () => {
       };
     }>(settingsPath());
     expect(after.hooks.SessionStart[0]!.hooks[0]!.command).toBe(userHook);
+  });
+});
+
+describe('buildHookCommand (shell escaping)', () => {
+  test('plain POSIX path wraps in single quotes', () => {
+    const cmd = buildHookCommand('stop.ts', '/home/alice/idle/hooks');
+    expect(cmd).toBe(
+      `npx tsx '/home/alice/idle/hooks/stop.ts' ${IDLE_TAG}`,
+    );
+    expect(isIdleOwnedCommand(cmd)).toBe(true);
+  });
+
+  test('path with spaces', () => {
+    const cmd = buildHookCommand(
+      'post-tool-use.ts',
+      '/Users/Alice Smith/idle/hooks',
+    );
+    expect(cmd).toBe(
+      `npx tsx '/Users/Alice Smith/idle/hooks/post-tool-use.ts' ${IDLE_TAG}`,
+    );
+    expect(isIdleOwnedCommand(cmd)).toBe(true);
+  });
+
+  test('path with a single quote is POSIX-escaped', () => {
+    const cmd = buildHookCommand(
+      'session-start.ts',
+      "/home/d'angelo/hooks",
+    );
+    // Single quote in the path becomes `'\''`
+    expect(cmd).toBe(
+      `npx tsx '/home/d'\\''angelo/hooks/session-start.ts' ${IDLE_TAG}`,
+    );
+    expect(isIdleOwnedCommand(cmd)).toBe(true);
+  });
+
+  test('path with shell metacharacters is inert inside single quotes', () => {
+    const cmd = buildHookCommand(
+      'session-end.ts',
+      '/weird/$path with`cmd`/and*glob',
+    );
+    expect(cmd).toBe(
+      `npx tsx '/weird/$path with\`cmd\`/and*glob/session-end.ts' ${IDLE_TAG}`,
+    );
+    expect(isIdleOwnedCommand(cmd)).toBe(true);
+  });
+
+  test('install+uninstall round-trips with a hooks dir containing spaces and quotes', () => {
+    // mkdtemp gives a simple path; construct a spacey hooksDir.
+    const spacey = join(tmp, "has space and 'quote'");
+    const result = installHooks({
+      settingsPath: settingsPath(),
+      hooksDir: spacey,
+    });
+    expect(result.ok).toBe(true);
+
+    // Commands all pass the predicate.
+    const settings = readJson<{
+      hooks: Record<
+        string,
+        Array<{ matcher: string; hooks: Array<{ command: string }> }>
+      >;
+    }>(settingsPath());
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
+      const cmd = group.hooks.find((h) => h.command.includes(IDLE_TAG))!.command;
+      expect(isIdleOwnedCommand(cmd)).toBe(true);
+    }
+
+    // Uninstall removes them all cleanly.
+    const uninstallResult = uninstall();
+    expect(uninstallResult.ok).toBe(true);
+    if (!uninstallResult.ok) throw new Error('unreachable');
+    expect(uninstallResult.removedEvents).toEqual([...IDLE_EVENTS]);
   });
 });
 

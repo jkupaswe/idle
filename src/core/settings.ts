@@ -325,12 +325,12 @@ function addIdleHooks(
     const idleCmd: HookCommand = hook.async
       ? {
           type: 'command',
-          command: commandFor(hook, hooksDir),
+          command: buildHookCommand(hook.script, hooksDir),
           async: true,
         }
       : {
           type: 'command',
-          command: commandFor(hook, hooksDir),
+          command: buildHookCommand(hook.script, hooksDir),
         };
     if (idx === -1) {
       groups.push({ matcher: '', hooks: [idleCmd] });
@@ -397,9 +397,32 @@ function removeIdleHooks(settings: SettingsFile): {
   return { next, removedEvents };
 }
 
-function commandFor(hook: IdleHookEvent, hooksDir: string): string {
-  const script = resolve(hooksDir, hook.script);
-  return `npx tsx ${script} ${IDLE_TAG}`;
+/**
+ * Compose the hook command for one IdleHookEvent. Always POSIX
+ * single-quote-wraps the script path so installing into directories
+ * containing spaces, `$`, `*`, backticks, etc. produces a valid shell
+ * command. `isIdleOwnedCommand` unquotes the middle on the way back
+ * out.
+ *
+ * Exported so tests and the CLI can call it directly; the internal
+ * install path uses it too.
+ */
+export function buildHookCommand(
+  script: IdleScript,
+  hooksDir: string,
+): string {
+  const absPath = resolve(hooksDir, script);
+  return `npx tsx ${shellEscape(absPath)} ${IDLE_TAG}`;
+}
+
+/**
+ * POSIX single-quote escape. Wraps the argument in single quotes and
+ * encodes any literal single quote as `'\''` — close the current quoted
+ * run, emit a backslash-escaped quote, reopen. Safe for every character
+ * (single-quoted strings disable all expansion in POSIX shells).
+ */
+function shellEscape(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
 // ---------------------------------------------------------------------------
