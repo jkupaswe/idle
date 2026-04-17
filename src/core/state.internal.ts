@@ -11,6 +11,7 @@
  * re-exported.
  */
 
+import { Buffer } from 'node:buffer';
 import {
   closeSync,
   fsyncSync,
@@ -289,10 +290,38 @@ function ensureStateFile(path: string): void {
     throw err;
   }
   try {
-    writeSync(fd, JSON.stringify(emptyState(), null, 2) + '\n');
+    writeAllSync(
+      fd,
+      Buffer.from(JSON.stringify(emptyState(), null, 2) + '\n', 'utf8'),
+    );
     fsyncSync(fd);
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Loop-until-done wrapper around `writeSync`. `writeSync` can return a
+ * partial byte count on some filesystems (NFS, FUSE, certain container
+ * overlays); the previous one-shot call could silently leave truncated
+ * JSON on disk. `writeAllSync` calls `writeSync(fd, buffer, offset,
+ * remaining)` repeatedly until the whole buffer is written, and throws
+ * if `writeSync` ever returns `<= 0`.
+ *
+ * Typed buffer only — callers convert strings via `Buffer.from(s, 'utf8')`
+ * so the encoding is explicit.
+ */
+function writeAllSync(fd: number, buffer: Buffer): void {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const remaining = buffer.length - offset;
+    const written = writeSync(fd, buffer, offset, remaining);
+    if (written <= 0) {
+      throw new Error(
+        `writeAllSync: writeSync returned ${written} with ${remaining} bytes remaining`,
+      );
+    }
+    offset += written;
   }
 }
 
@@ -303,7 +332,7 @@ function atomicWriteFile(path: string, contents: string): void {
     .slice(2)}`;
   const fd = openSync(tmp, 'w', 0o644);
   try {
-    writeSync(fd, contents);
+    writeAllSync(fd, Buffer.from(contents, 'utf8'));
     fsyncSync(fd);
   } finally {
     closeSync(fd);
