@@ -294,21 +294,15 @@ This document defines the agent fleet, the ticket dependency graph, and individu
 
 ---
 
-### T-010: Stop hook with prompt output (Hooks)
+### T-010: Stop hook (Hooks)
 
 **Depends on:** T-004, T-005, T-007, T-012 (prompt templates)
 **Files:** `src/hooks/stop.ts`, `tests/hooks/stop.test.ts`, `tests/fixtures/stop-*.json`
 
-**Description:** Fires when the agent stops responding. If a check-in is pending, emits a prompt-hook JSON response that Claude Code will use to run an LLM call, and arranges for the result to trigger a notification.
+**Description:** Fires when the agent stops responding. If a check-in is pending, generates a one-sentence break suggestion via `claude -p` and fires a notification. No second, prompt-type hook — a single `command`-type Stop hook does everything. This keeps `SessionEntry` free of a transient pending-prompt field and removes the marker-file handoff. (Resolved 2026-04-16 after Wave 1 review.)
 
-**Note:** The Stop hook is configured in settings.json as a `prompt`-type handler, not a `command`. For the command-side logic (checking pending_checkin, updating state, firing notification after LLM response), we use a companion `command`-type Stop hook that runs first. The prompt-type hook then generates the break suggestion.
-
-Two-hook strategy for Stop:
-1. First hook (command-type): decides whether a check-in is needed. Writes a "fire notification" marker file with the chosen prompt template's filled-in text. Resets the counter.
-2. Second hook (prompt-type): uses the filled-in prompt template to generate the break suggestion. Its output is piped to a small command that displays the notification.
-
-Given the current hook API, the cleanest implementation:
-- The command-type Stop hook reads state, decides if check-in is needed, and if so generates the final break suggestion by directly using the configured prompt via a subshell `claude -p "<prompt>"` call. It then calls `notify()` directly. This keeps everything in one script and avoids relying on the prompt hook type (which has less tested ergonomics).
+Implementation sketch:
+- The command-type Stop hook reads state, decides if a check-in is needed, and if so generates the final break suggestion by invoking `claude -p "<filled-prompt>"` in a subshell. It then calls `notify()` directly.
 
 **Acceptance:**
 - Reads stdin JSON, extracts `session_id`.
