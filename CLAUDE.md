@@ -16,6 +16,95 @@ Idle is a CLI tool that integrates with Claude Code via hooks to surface gentle 
 - **Error handling:** Throw `Error` or subclasses. Never throw strings. All top-level catches in CLI commands print a user-friendly message to stderr and exit 1.
 - **Logging:** All debug logging goes to `~/.idle/debug.log` via `src/lib/log.ts`. Never `console.log` inside hook scripts — Claude Code captures stdout for protocol use.
 
+## Established architecture (load-bearing decisions)
+
+These decisions are settled. Do not silently re-decide them during implementation. If you want to discuss any of them, file an issue or PR comment — but do not change them in-place.
+
+### Shipping model
+
+Idle ships TypeScript sources and executes hooks via `npx tsx`. No compiled `dist/` is produced or referenced at runtime. Installed hook commands have the form:
+
+```
+npx tsx /abs/path/src/hooks/<name>.ts # idle:v1
+```
+
+This decision is load-bearing across `src/core/settings.ts`, `package.json`'s `files` allowlist, and all CLI install/uninstall flows. Do not:
+- Introduce a build step that emits `dist/`
+- Reference `dist/` from runtime code paths
+- Change hook paths to `.js` extensions
+- Add bundlers, compilers, or transpilers to the runtime path
+
+`tsc --noEmit` is used for typechecking only. No emit.
+
+### Never-throw primitives
+
+The following functions are contractually never-throw. They always resolve (if Promise) or return normally (if sync). Failures are logged to `~/.idle/debug.log` and swallowed.
+
+- `log()` (src/lib/log.ts)
+- `notify()` (src/core/notify.ts)
+
+Callers do not need `try/catch` or `.catch()` around these. If you find yourself wrapping a call to one of them defensively, that is a signal that either the primitive has a bug (file one) or you are misreading the contract.
+
+### Hook ownership
+
+Idle-owned hooks in `~/.claude/settings.json` are identified by a strict three-condition predicate (`isIdleOwnedCommand` in `src/core/settings.ts`):
+
+1. Command ends with `# idle:v1` (optionally trailing whitespace only)
+2. Command starts with the canonical Idle prefix (`npx tsx `)
+3. Embedded script path matches one of the four expected Idle hook paths
+
+All three must be true. Substring matching is never used. This predicate is the only correct way to identify Idle-owned hooks.
+
+### Async hook flag per event
+
+When installing hooks into `~/.claude/settings.json`, the `async` flag is per-event:
+
+- `SessionStart`: `async: true`
+- `PostToolUse`: `async: true` (required for the <50ms latency guarantee in PRD §7)
+- `Stop`: `async: false` (must complete before the notification fires)
+- `SessionEnd`: `async: true`
+
+This is encoded in the `IdleHookEvent` discriminated union in `src/core/settings.ts`. Do not emit sync hooks on async events or vice versa.
+
+## Shared primitives (use these, do not reimplement)
+
+Core Wave 2 produced a set of primitives that every Wave 2 and later agent must use rather than rolling their own. If a primitive should exist but doesn't, file a follow-up ticket to add it rather than inlining a one-off.
+
+### Filesystem safety
+- **`writeAllSync(fd, buffer)`** (src/lib/fs.ts) — loops until full buffer is written. Handles short-write edge cases on some filesystems. Use for any `fs.writeSync` call on files users care about. Do not call raw `fs.writeSync` or `fs.writeFileSync` directly on state/config/settings files.
+- **`atomicWriteFile(path, data)`** (src/lib/fs.ts) — writes to temp file, fsyncs, renames. The canonical atomic-write primitive.
+
+### Time
+- **`nowIso()` / `timestampSuffix()`** (src/lib/time.ts) — filename-safe ISO suffixes for backup and corruption files. Never format timestamps inline.
+
+### Branded types
+- **`isAbsolutePath(x)` / `asAbsolutePath(x)`** (src/lib/types.ts + src/core/config.ts) — branded AbsolutePath validation. The guard returns a type predicate; the `as*` variant throws on invalid input.
+- **`isSessionId(x)`** (src/lib/types.ts) — SessionId brand guard. Validates Claude Code session ID shape.
+- **`ms(n)`** (src/lib/types.ts) — Milliseconds constructor. Validates non-negative finite; throws on invalid. Prevents seconds-vs-ms confusion.
+
+### State (src/core/state.ts — public API)
+Use the named helpers. `_updateState` is module-private by design and is not exported.
+
+- **`readState()`** — returns `ReadStateResult` discriminated union (`fresh | empty | recovered | partial`).
+- **`registerSession(id, projectPath, disabled)`** — atomic session init.
+- **`removeSession(id)`** — atomic session deletion.
+- **`takeSessionSnapshot(id)`** — atomic read of entry (used by SessionEnd).
+- **`consumePendingCheckin(id)`** — atomic read-and-clear of pending_checkin. Use for the Stop hook's check-in logic. This helper is race-safe; do not implement check-in clearing manually.
+- **`incrementToolCounter(id, tool, thresholds)`** — atomic increment + threshold check. Defaults to 200ms timeout, fail-open (never throws on timeout). Use this for `PostToolUse`; do not reach for `readState` + custom mutation.
+
+### Settings (src/core/settings.ts — public API)
+- **`installHooks()`** — returns `InstallResult` discriminated union. Handles backup, atomic write, and file locking.
+- **`uninstallHooks()`** — returns `UninstallResult` discriminated union. `fileExisted: false` when settings.json didn't exist; do not manufacture it.
+
+### Config (src/core/config.ts — public API)
+- **`loadConfig()`** — strict. Throws `ConfigParseError` on malformed TOML, `ConfigValidationError` on schema violation. Missing file returns defaults (logged to debug).
+- **`saveConfig(config)`** — atomically writes TOML. Creates `~/.idle/` if missing.
+- **`validateConfig(input)`** — returns discriminated `{ ok: true; config } | { ok: false; errors }`.
+- **`ConfigParseError` / `ConfigValidationError`** — error classes with structured fields.
+
+### Notification (src/core/notify.ts — public API)
+- **`notify({ title, body, sound? })`** — never-throw per above. Shell-escapes inputs; uses `--` separator on Linux to prevent flag injection from LLM-generated content.
+
 ## File scope rules
 
 Agents working on this repo must respect file ownership per the task graph in `TASKS.md`. If a ticket is assigned the `core/config.ts` scope, the agent does not edit `hooks/stop.ts` even if they spot a bug — they flag it in a PR comment or a follow-up ticket.
@@ -26,28 +115,29 @@ Agents working on this repo must respect file ownership per the task graph in `T
 - `.github/workflows/*` — owned by Architect
 - Another agent's assigned files — coordinate via PR comments
 
+## Implementation discipline
+
+These rules apply to every ticket, every agent. They prevent the "drift" class of bugs that cost multiple review rounds during Core Wave 2.
+
+1. **Explicitly restate settled decisions in your PR description.** If your ticket touches shipping model, hook ownership, async flags, or any primitive listed above, name the decision in the PR so reviewers can verify you honored it.
+
+2. **Call out what NOT to do when relevant.** If your ticket has a plausible wrong path (e.g., "use `execFile`, not `spawn` or `exec`"), include the negative constraint. Negative constraints prevent drift more reliably than positive ones.
+
+3. **Name specific primitives, not categories.** "Use `incrementToolCounter`" is stronger than "use the state module." Be precise in both tickets and PRs.
+
+4. **If an implicit architectural decision could affect your work, treat that as a spec gap and flag it in a PR comment before implementing.** Do not resolve it silently. Do not pick "the cleaner option." Surface the ambiguity.
+
+5. **For complex tickets, require a plan before code.** If your ticket has multiple non-trivial implicit decisions, produce a one-page design doc first (proposed types, failure modes, test matrix, library choices). Post it as a PR draft or issue comment. Wait for review before writing code.
+
 ## Safety rules (this is dev-tool code that writes to user homedirs)
 
 This code writes to `~/.claude/settings.json` — the user's live Claude Code config. Mistakes here break other developers' setups. Therefore:
 
-1. **Every file write under `~/.claude/` is atomic.** Write to temp file, fsync, rename. Never write in place.
-2. **Every destructive operation creates a timestamped backup first.** No exceptions.
-3. **The uninstall path must be provably reversible.** Tests must verify that `install → uninstall` returns settings.json byte-identical to the pre-install state (modulo the backup file).
-4. **Never use `fs.writeFileSync` on settings.json directly.** Use `atomicWriteFile` from `src/lib/fs.ts`, or the named helpers in `src/core/settings.ts`.
-5. **Hook scripts must be defensive about malformed input.** Claude Code's hook JSON schema has evolved; never assume a field exists without checking.
-
-## Shared safety primitives (use these, don't reimplement)
-
-Reach for these helpers before writing a local version. If a primitive should exist but doesn't, file a follow-up ticket or leave a PR comment — don't inline a new one.
-
-- `writeAllSync(fd, buffer)` — `src/lib/fs.ts`. Atomic full-buffer write that handles short-write edge cases on NFS / FUSE / container overlays. Use for any `fs.writeSync` on a file users care about.
-- `atomicWriteFile(path, contents)` — `src/lib/fs.ts`. Temp + `fsync` + `rename`; layers on `writeAllSync`. The default write path for state.json and settings.json.
-- `timestampSuffix()` / `nowIso()` — `src/lib/time.ts`. Filename-safe ISO suffixes for backup files; ISO-8601 strings for logs and on-disk timestamps.
-- `isAbsolutePath` / `asAbsolutePath` — `src/core/config.ts` (brand re-exported from `src/lib/types.ts`). Validation + brand crossing for POSIX absolute paths.
-- `isSessionId` — `src/lib/types.ts`. Branded `SessionId` guard for Claude Code session identifiers.
-- `isValidSessionEntry` — `src/lib/types.ts`. Per-entry schema guard for `SessionState.sessions`; malformed entries are backed up to a sidecar rather than crashing helpers.
-- `ms(n)` — `src/lib/types.ts`. `Milliseconds` constructor with non-negative-finite validation. Prevents seconds-vs-ms bugs at call sites.
-- `log(level, msg, meta?)` — `src/lib/log.ts`. Debug logger; never throws. Never `console.*` inside hook scripts.
+1. **Every file write under `~/.claude/` is atomic.** Use `atomicWriteFile` from `src/lib/fs.ts`. Never write in place.
+2. **Every destructive operation creates a timestamped backup first.** No exceptions. Use `timestampSuffix()` for the filename.
+3. **The uninstall path must be provably reversible.** Tests must verify that `install → uninstall` returns settings.json byte-identical to the pre-install state.
+4. **Hook scripts must be defensive about malformed input.** Claude Code's hook JSON schema has evolved; never assume a field exists without checking.
+5. **Concurrent writers on settings.json are handled by file locking** (`proper-lockfile`). Do not bypass.
 
 ## Testing requirements
 
@@ -56,6 +146,7 @@ Reach for these helpers before writing a local version. If a primitive should ex
 - CLI commands have smoke tests (spawn a child process, assert on output/exit).
 - Fixture files live in `tests/fixtures/` — real hook JSON payloads captured from running Claude Code, anonymized.
 - Coverage is not a goal; behavior coverage of the critical paths (install, uninstall, hook-fires-notification, state-atomic-write) is.
+- Tests must prove invariants, not just exercise code. "10 concurrent calls succeed" is weaker than "10 concurrent calls produce exactly one winner per race primitive." Prefer assertive concurrency tests over loose parallelism tests.
 
 ## Voice and copy
 
@@ -78,6 +169,7 @@ Review any user-facing copy against these rules before committing.
 - Subject line under 72 chars.
 - Body (when needed) explains *why*, not *what*.
 - Every PR references the ticket ID from `TASKS.md`, e.g. `feat(core): implement atomic state writer (TICKET-004)`.
+- Adversarial-review fix commits reference the decision tag, e.g. `fix(core): enforce wall-clock deadline across state ops (gpt-review-3, Decision G)`.
 
 ## When in doubt
 
@@ -85,4 +177,4 @@ If a ticket's acceptance criteria are ambiguous, flag it in a PR comment rather 
 
 ## Model ownership (informational)
 
-Different agents are running on different models. The Architect is on Opus, implementers are on Sonnet, docs agent is on Haiku. Don't assume any single agent has read every ticket. Read the ticket you're assigned, read this file, read the PRD. That's your context.
+Different agents are running on different models. The Architect is on Opus, implementers are typically on Sonnet, docs agent is on Haiku, complex implementation tickets may use an Opus-design-then-Sonnet-implement split. Don't assume any single agent has read every ticket. Read the ticket you're assigned, read this file, read the PRD. That's your context.
