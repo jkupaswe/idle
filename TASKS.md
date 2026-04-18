@@ -647,7 +647,7 @@ Items filed during implementation, deferred from their original tickets.
 **Description:** `package.json` declared `./bin/idle` but the file didn't exist; `files` allowlist referenced paths that weren't shipping. T-014 creates `bin/idle`, restores the `bin` field, and adds a `tests/core/package.test.ts` that runs `npm pack --dry-run` and asserts all declared paths are present.
 
 ### F-002 — Consolidate writeAllSync in lib/fs.ts
-**Status:** Open, low priority
+**Status:** Resolved by PR #17
 **Origin:** T-005 round 4; re-surfaced during T-006 review
 **Description:** T-005's `state.internal.ts` has its own local `writeAllSync`; T-006 created the shared `src/lib/fs.ts` version. The T-005 version should switch to importing from `lib/fs.ts` so the two cannot drift. Small refactor, appropriate for end-of-Wave-2 polish pass.
 
