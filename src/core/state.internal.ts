@@ -19,12 +19,12 @@ import {
   openSync,
   readFileSync,
   renameSync,
-  writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 
 import lockfile from 'proper-lockfile';
 
+import { writeAllSync } from '../lib/fs.js';
 import { log } from '../lib/log.js';
 import { idleStatePath } from '../lib/paths.js';
 import { timestampSuffix } from '../lib/time.js';
@@ -307,31 +307,6 @@ function ensureStateFile(path: string): void {
     fsyncSync(fd);
   } finally {
     closeSync(fd);
-  }
-}
-
-/**
- * Loop-until-done wrapper around `writeSync`. `writeSync` can return a
- * partial byte count on some filesystems (NFS, FUSE, certain container
- * overlays); the previous one-shot call could silently leave truncated
- * JSON on disk. `writeAllSync` calls `writeSync(fd, buffer, offset,
- * remaining)` repeatedly until the whole buffer is written, and throws
- * if `writeSync` ever returns `<= 0`.
- *
- * Typed buffer only — callers convert strings via `Buffer.from(s, 'utf8')`
- * so the encoding is explicit.
- */
-function writeAllSync(fd: number, buffer: Buffer): void {
-  let offset = 0;
-  while (offset < buffer.length) {
-    const remaining = buffer.length - offset;
-    const written = writeSync(fd, buffer, offset, remaining);
-    if (written <= 0) {
-      throw new Error(
-        `writeAllSync: writeSync returned ${written} with ${remaining} bytes remaining`,
-      );
-    }
-    offset += written;
   }
 }
 
