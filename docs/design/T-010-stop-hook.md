@@ -1,8 +1,37 @@
 # T-010 — Stop hook design doc
 
-Fires when the agent finishes responding. If a check-in is pending, generates a one-sentence break suggestion via `claude -p` and triggers a native notification. Composes five shipped primitives: `consumePendingCheckin`, `loadConfig`, the four tone-preset `buildPrompt` functions, a new `invokeClaudeP` helper, and `notify`.
+Fires when the agent finishes responding. If a check-in is pending, generates a one-sentence break suggestion via `claude -p` and triggers a native notification. Composes six shipped / proposed primitives: `consumePendingCheckin`, `loadConfig`, the four tone-preset `buildPrompt` functions, a **new** `invokeClaudeP` subprocess helper, a **new** `normalizeClaudeOutput` pure function, and `notify`.
 
 Design phase only; no `src/hooks/stop.ts` or tests in this PR.
+
+## Prerequisites — must land before Phase 2
+
+**P-1: Extend `src/core/notify.ts` to accept `method` in addition to `sound`.**
+
+Current `NotifyInput` shape (verified against `origin/main`):
+
+```ts
+export interface NotifyInput {
+  title: string;
+  body: string;
+  sound?: boolean;
+}
+```
+
+`config.notifications.method` (`'native' | 'terminal' | 'both'`) is not honored by `notify()` today — it dispatches purely on `process.platform`. Decision X requires the Stop hook to forward both `sound` and `method` to every `notify()` call. Shape this design targets:
+
+```ts
+export type NotificationMethod = 'native' | 'terminal' | 'both';
+
+export interface NotifyInput {
+  title: string;
+  body: string;
+  sound?: boolean;
+  method?: NotificationMethod;     // default 'native' when undefined
+}
+```
+
+Core-owned change; out of Hooks scope. T-010 design is approved-but-blocked until P-1 ships. Flagged in the PR description as a prerequisite.
 
 ## 1. Proposed types
 
@@ -14,19 +43,27 @@ Reused, imported as-is:
 - `SessionEntry` — fields returned inside the `consumePendingCheckin` success snapshot. Pre-reset values; counters reflect what tripped the threshold.
 - `CheckInStats` — `{ duration_minutes, tool_calls, last_tool_name?, last_tool_summary? }`.
 - `TonePreset` — `'dry' | 'earnest' | 'absurdist' | 'silent'`.
+- `NotificationsConfig` — `{ method: 'native' | 'terminal' | 'both', sound: boolean }` from `IdleConfig`.
 - `SessionId` + `isSessionId` — brand guard.
 
-Two new *internal* types, scoped to `src/hooks/stop.ts`:
+Two new *internal* types + one new exported pure function, scoped to `src/hooks/stop.ts`:
 
 ```ts
 type TemplateBuilder = (stats: CheckInStats) => string;
 
 type ClaudeResult =
-  | { ok: true; output: string }
+  | { ok: true; rawOutput: string }                 // raw stdout, no transforms
   | { ok: false; reason: 'timeout' | 'enoent' | 'nonzero' | 'killed' };
+
+export function normalizeClaudeOutput(raw: string): string;
 ```
 
-`TemplateBuilder` keys a tone→builder dispatch table so callers do not hand-dispatch on the union. `ClaudeResult` is the testable seam — tests mock `invokeClaudeP` rather than the underlying `execFile`.
+Two explicit layers so transforms are unit-testable without a subprocess:
+
+- **`invokeClaudeP(prompt)`** owns the subprocess concern. Returns **raw stdout** on success — no trimming, no ANSI strip, no cap. That's the "test theater" Codex flagged: mocking this seam must not also mock the transforms.
+- **`normalizeClaudeOutput(raw)`** is a pure function. Same input, same output, no side effects. Exported so a dedicated test suite hits it directly with no mocks.
+
+The hook flow calls both in sequence; neither knows about the other's contract beyond `string`-in, `string`-out.
 
 ## 2. Child process invocation
 
@@ -46,36 +83,48 @@ Options:
 
 ### Deviation from TASKS.md — 8s instead of 15s
 
-TASKS.md T-010 specifies `timeout: 15_000`. This doc deviates to **8 seconds**. Reasoning:
+TASKS.md T-010 currently specifies `timeout: 15_000`. **Per Decision Y this PR also updates TASKS.md T-010 to `8_000`** alongside the design revision. Reasoning (cited in both docs):
 
 - **Stop is `async: false`.** Claude Code blocks on hook completion before starting the user's next turn. 15s worst-case user-visible block is a lot for a "dry, unobtrusive" tool — the product brand is the opposite of getting in your way.
 - **Typical `claude -p` latency for a 30-word output is 2–5s.** 8s has comfortable headroom for network hiccups.
 - **Timeout is a soft failure.** Firing the timeout falls through to the silent-preset body, which is voice-consistent and delivers the stats. The user still gets a signal; they just don't get the LLM sentence.
 
-The PR description flags this deviation explicitly so reviewers catch it.
-
 ### stdio and binary resolution
 
-- `stdio`: default (pipes). Capture stdout and stderr. **Do not** inherit to parent — would leak claude's internal logging into the user's terminal.
-- PATH resolution: let `execFile` find the binary. On `ENOENT` (claude missing from PATH) the Promise rejects with `err.code === 'ENOENT'`; the helper maps that to `ClaudeResult.ok = false, reason = 'enoent'`.
+- `stdio`: default (pipes). Capture stdout and stderr inside the helper. **Do not** inherit to parent — would leak claude's internal logging into the user's terminal.
+- PATH resolution: let `execFile` find the binary. On `ENOENT` (claude missing from PATH) the Promise rejects with `err.code === 'ENOENT'`; the helper maps that to `{ ok: false, reason: 'enoent' }`.
 - Auth: `env: process.env` means the spawned `claude` inherits the user's Claude Code auth. No API keys, no proxy.
 
-### Stdout pipeline
+### stderr treatment
 
-Applied in order inside `invokeClaudeP`:
+Captured by `execFileP`. Non-zero exit → `{ ok: false, reason: 'nonzero' }`, with stderr logged at `debug` alongside the exit code. **Zero exit with stderr content is NOT a failure** — logged at `debug` but the stdout is returned as `rawOutput`. Per Decision Y this policy also lands in TASKS.md. Reasoning: CLI tools routinely emit stderr during normal operation (deprecation warnings, info logs); treating any stderr as failure would cause near-universal fallback.
+
+### `invokeClaudeP` returns
+
+On success: `{ ok: true, rawOutput: string }` — stdout as-is, with no transformations. Even empty. Even multi-line. Even ANSI-laden. The helper's job ends there.
+
+On failure: `{ ok: false, reason: 'timeout' | 'enoent' | 'nonzero' | 'killed' }`. `killed` is reserved for signals that aren't SIGTERM-from-timeout (e.g. a user hitting Ctrl+C on the parent Claude Code); in practice this is rare.
+
+The helper swallows no errors. Any throw inside it propagates to the hook's outer `try/catch`.
+
+## 3. Output normalization
+
+Pure function; no side effects. Consumed by the hook after a successful `invokeClaudeP`. Exported so a dedicated test suite hits it directly.
+
+```ts
+export function normalizeClaudeOutput(raw: string): string;
+```
+
+Pipeline, applied in order:
 
 1. **Strip ANSI escapes** — `/\x1b\[[0-9;]*[A-Za-z]/g` → `''`. `claude -p` in non-interactive mode probably does not emit ANSI, but we strip defensively so a future version change does not corrupt notification bodies.
 2. **Trim** — drop leading/trailing whitespace.
-3. **First non-empty line** — `.split('\n').find(l => l.trim().length > 0) ?? ''`. A model that returns a preamble + the sentence still gets normalized.
+3. **First non-empty line** — `.split('\n').find(l => l.trim().length > 0)?.trim() ?? ''`. A model that returns a preamble + the sentence still gets normalized.
 4. **Cap at 200 chars** — matches the `tool_input_summary` cap and OS notification truncation behavior.
 
-Whitespace-only or empty result after this pipeline is treated as a failure and falls through to the silent-preset output.
+**Empty input returns empty string.** The pure function does not decide fallback — it returns `''` and the caller chooses what to do with it. This keeps the function testable in isolation (no sentinels, no Result type, no fallback coupling).
 
-### Stderr treatment
-
-Captured by `execFileP`. Per TASKS.md: "Child stderr noise but zero exit → use stdout anyway (log the stderr to debug)." Non-zero exit → `ClaudeResult.ok = false, reason = 'nonzero'`. Either way the stderr is logged at `debug` from inside `invokeClaudeP` so the top-level flow doesn't see it.
-
-## 3. Prompt construction
+## 4. Prompt construction and config wiring
 
 - **Config:** `loadConfig()` wrapped in `safeLoadConfig()` (same pattern as T-009 `post-tool-use.ts`). On `ConfigParseError` / `ConfigValidationError` / any thrown Error: `log('warn', …)`, fall back to `defaultConfig()`. A broken config does NOT short-circuit the notification — the user still gets a fallback ping.
 - **Tone dispatch:** small `const TEMPLATES: Readonly<Record<TonePreset, TemplateBuilder>>` mapping each preset to its imported `buildPrompt`. No dynamic import, no switch; the table makes the exhaustiveness compile-checked.
@@ -85,10 +134,22 @@ Captured by `execFileP`. Per TASKS.md: "Child stderr noise but zero exit → use
   - `last_tool_name = entry.last_tool_name`. Passthrough. Templates sanitize via `renderLastTool` → `sanitizeUntrustedField`.
   - `last_tool_summary = entry.last_tool_summary`. Passthrough.
   - **Subagent counters are NOT summed in.** Per F-003 deferral in current TASKS.md.
-  - `last_assistant_message` from the stdin payload is **ignored** in v1. Additive for v2 if desired.
-- **Silent short-circuit:** after config + stats, before invoking claude, check `config.tone.preset === 'silent'`. If so, `await notify({ title: 'Idle', body: TEMPLATES.silent(stats) })` and return. No child process, no LLM cost.
+  - `last_assistant_message` from the stdin payload is **ignored** in v1. Additive for v2.
+- **Notification options (Decision X):** every `notify()` call forwards both notification fields from config:
 
-## 4. Flow diagram
+  ```ts
+  const notifOpts = {
+    title: 'Idle',
+    sound: config.notifications.sound,
+    method: config.notifications.method,
+  } as const;
+  await notify({ ...notifOpts, body });
+  ```
+
+  Applies to all three call sites: silent-preset success, LLM-preset success, and every fallback path (timeout / ENOENT / nonzero / empty-after-normalize). Prereq P-1 is what makes `method` actually honored by `notify()`.
+- **Silent short-circuit:** after config + stats, before invoking claude, check `config.tone.preset === 'silent'`. If so, `await notify({ ...notifOpts, body: TEMPLATES.silent(stats) })` and return. No child process, no LLM cost.
+
+## 5. Flow diagram
 
 ```
 stdin
@@ -105,31 +166,38 @@ isSessionId(payload.session_id)?
   ▼
 await consumePendingCheckin(sessionId)
   │
-  ├── { ok: false, reason: 'not_pending'    } → exit 0 silently (hot path)
-  ├── { ok: false, reason: 'not_found'      } → log debug, exit 0
-  ├── { ok: false, reason: 'disabled'       } → log debug, exit 0
-  ├── { ok: false, reason: 'timeout'        } → log warn,  exit 0
+  ├── { ok: false, reason: 'not_pending' } → exit 0 silently (hot path)
+  ├── { ok: false, reason: 'not_found'   } → log debug, exit 0
+  ├── { ok: false, reason: 'disabled'    } → log debug, exit 0
+  ├── { ok: false, reason: 'timeout'     } → log warn,  exit 0
   │
   └── { ok: true, entry, cleared: true }
          │
          ▼
-       config = safeLoadConfig()   (never throws; falls back to defaults)
+       config    = safeLoadConfig()        (never throws)
+       stats     = buildStats(entry)
+       notifOpts = { title:'Idle', sound, method }
+       silentBody= TEMPLATES.silent(stats)
          │
          ▼
-       stats = buildStats(entry)
-         │
-         ▼
-       tone = config.tone.preset
-       preset === 'silent'?
-         │  (yes)   → await notify({title:'Idle', body: TEMPLATES.silent(stats)}), exit 0
+       config.tone.preset === 'silent'?
+         │  (yes)   → await notify({ ...notifOpts, body: silentBody }), exit 0
          ▼
        prompt = TEMPLATES[tone](stats)
        result = await invokeClaudeP(prompt)
          │
-         ├── { ok: true,  output } → await notify({title:'Idle', body: output}), exit 0
-         └── { ok: false, reason } → log debug "claude invocation failed",
-                                      await notify({title:'Idle', body: TEMPLATES.silent(stats)}),
-                                      exit 0
+         ├── { ok: false, reason }   → log debug, await notify({ ...notifOpts, body: silentBody }), exit 0
+         │
+         └── { ok: true, rawOutput }
+                │
+                ▼
+             body = normalizeClaudeOutput(rawOutput)
+                │
+                ├── body === ''        → log debug "claude empty after normalize",
+                │                          await notify({ ...notifOpts, body: silentBody }),
+                │                          exit 0
+                │
+                └── body !== ''        → await notify({ ...notifOpts, body }), exit 0
 ```
 
 ### Why `stop_hook_active` is at step 2, not later
@@ -144,7 +212,7 @@ The entire body of `run(input)` sits inside a single outer try/catch whose only 
 
 Every branch exits 0. Nothing writes to stdout (Claude Code owns stdout for protocol).
 
-## 5. Error handling matrix
+## 6. Error handling matrix
 
 | Failure mode | Detection | Fallback | Log | User sees |
 |---|---|---|---|---|
@@ -157,54 +225,85 @@ Every branch exits 0. Nothing writes to stdout (Claude Code owns stdout for prot
 | `consumePendingCheckin` → `not_found` | union arm | exit 0 | `debug` | nothing |
 | `consumePendingCheckin` → `disabled` | union arm | exit 0 | `debug` | nothing |
 | `consumePendingCheckin` → `timeout` | union arm | exit 0 | `warn` | nothing |
-| `ConfigParseError` | `safeLoadConfig` catches | `defaultConfig()` | `warn` | fallback notification (silent template body if tone→silent, else LLM attempt) |
-| `ConfigValidationError` | `safeLoadConfig` catches | `defaultConfig()` | `warn` | same as above |
-| `claude` not on PATH (ENOENT) | `err.code === 'ENOENT'` | `ClaudeResult.ok=false, reason:'enoent'` → silent template output | `debug` | silent-preset body |
-| `claude` timeout (8s) | `err.signal === 'SIGTERM'` with child killed | `reason: 'timeout'` → silent | `debug` | silent-preset body |
-| `claude` non-zero exit | `err.code !== 0` | `reason: 'nonzero'` → silent | `debug` with exit code + stderr | silent-preset body |
-| `claude` stderr-with-zero-exit | zero exit, stderr non-empty | treat as success; use stdout | `debug` with stderr | LLM output |
-| `claude` empty / whitespace-only stdout | after trim + first-line extraction, result is `''` | silent template output | `debug` | silent-preset body |
-| `claude` multi-line stdout | pipeline takes first non-empty line | LLM output (first line) | — | first line of LLM output |
-| `claude` ANSI-laden stdout | ANSI strip in pipeline | cleaned LLM output | — | cleaned LLM body |
-| `claude` very long stdout (>200 chars) | pipeline's 200-char cap | truncated LLM output | — | capped body |
+| `ConfigParseError` | `safeLoadConfig` catches | `defaultConfig()` | `warn` | fallback notification (silent body if tone→silent, else LLM attempt) with default sound/method |
+| `ConfigValidationError` | `safeLoadConfig` catches | `defaultConfig()` | `warn` | same |
+| `claude` not on PATH (ENOENT) | `err.code === 'ENOENT'` | silent body, with configured sound/method | `debug` | silent-preset body via configured method |
+| `claude` timeout (8s) | child killed by timeout | silent body | `debug` | silent-preset body via configured method |
+| `claude` non-zero exit | `err.code !== 0` | silent body | `debug` with exit code + stderr | silent-preset body via configured method |
+| `claude` zero exit, stderr non-empty | zero exit + stderr has content | treat as success; use stdout | `debug` with stderr | LLM output via configured method |
+| `normalizeClaudeOutput` returns `''` (empty / whitespace-only / ANSI-only) | `body === ''` after pipeline | silent body | `debug` "claude empty after normalize" | silent-preset body via configured method |
 | Unexpected exception in `run()` body | outer `try/catch` | exit 0 | `error` with stack | nothing (notify NOT called) |
 
 `notify()` itself: contractually never-throws. Omitted from the matrix as a non-failure.
 
-## 6. Test matrix
+## 7. Test matrix
 
-One row per flow branch. All tests drive `run(input: string)` directly; the entry-point guard keeps module import side-effect-free. Tests mock `invokeClaudeP` (the exported helper), not `execFile` — a single seam, cheaper than `vi.mock('node:child_process')`.
+Tests split across **three layers** so the subprocess dance and the pure transforms can't fake-test each other.
 
-| Test name | Input (stdin / state / config) | Expected (exit / notify args / state mutation) | Seam |
+### 7a. Hook-level tests (`tests/hooks/stop.test.ts`)
+
+Drive `run(input: string)` directly; entry-point guard keeps module import side-effect-free. Mock `invokeClaudeP` (single seam). Assert flow control, fallback routing, config handling, and `notify()` args.
+
+| Test name | Input (stdin / state / config) | Expected (exit / notify args / state) | Seam |
 |---|---|---|---|
 | `not_pending short-circuit` | valid stdin, session exists, no `pending_checkin` | exit 0, no notify, no state change | none |
-| `invalid session_id` | stdin has empty string `session_id` | exit 0, no state read, warn log | none |
-| `stop_hook_active guard` | stdin has `stop_hook_active: true` | exit 0, no `consumePendingCheckin` call, no notify | none |
-| `silent preset short-circuits claude call` | pending session, config tone=silent | exit 0, notify body = `"<m>m / <n> tool calls"`, `invokeClaudeP` not called | `invokeClaudeP` mock throws if invoked |
-| `dry preset happy path` | pending session, tone=dry | exit 0, notify body = trimmed LLM output | `invokeClaudeP` → `{ok:true, output:'Go stretch.'}` |
+| `invalid session_id` | stdin has empty `session_id` | exit 0, no state read, warn log | none |
+| `stop_hook_active guard` | stdin has `stop_hook_active: true` | exit 0, no `consumePendingCheckin`, no notify | none |
+| `silent preset short-circuits claude call` | pending session, tone=silent | exit 0, notify body = `"<m>m / <n> tool calls"`, `invokeClaudeP` NOT called | `invokeClaudeP` mock throws on call |
+| `dry preset happy path` | pending session, tone=dry | exit 0, notify body = normalized LLM output | `invokeClaudeP` → `{ok:true, rawOutput:'Go stretch.'}` |
 | `earnest preset happy path` | tone=earnest | same | same |
 | `absurdist preset happy path` | tone=absurdist | same | same |
-| `claude timeout falls back to silent output` | tone=dry | notify body byte-identical to silent template, debug log entry | `invokeClaudeP` → `{ok:false, reason:'timeout'}` |
-| `claude ENOENT falls back` | tone=dry | same body, debug log with `reason:'enoent'` | `invokeClaudeP` → `{ok:false, reason:'enoent'}` |
-| `claude non-zero exit falls back` | tone=dry | same body, debug log with `reason:'nonzero'` | `invokeClaudeP` → `{ok:false, reason:'nonzero'}` |
-| `claude empty stdout falls back` | tone=dry | same body as silent fallback | `invokeClaudeP` → `{ok:true, output:''}` |
-| `claude whitespace-only stdout falls back` | tone=dry | same | `invokeClaudeP` → `{ok:true, output:'   \n\n  '}` |
-| `claude multi-line stdout → first non-empty line` | tone=dry | notify body = first non-empty line only | `invokeClaudeP` → `{ok:true, output:'\n\nFirst.\nSecond.\n'}` |
-| `ANSI escape codes stripped before notify` | tone=dry | notify body contains no `\x1b` | `invokeClaudeP` simulates ANSI in output |
-| `long stdout capped at 200 chars` | tone=dry, claude returns 500-char output | `notify` body `.length === 200` exactly | `invokeClaudeP` returns 500-char output |
-| `ConfigValidationError → defaults, still notifies` | pending session, `config.toml` has invalid preset | exit 0, notify called with a valid body | `invokeClaudeP` mock returns canned output |
-| `consumePendingCheckin reason=not_found` | stdin session_id unknown to state | exit 0, debug log, no notify | none |
+| `notify forwards config.notifications.sound` | tone=silent, config sound=true | notify called with `sound: true` | none |
+| `notify forwards config.notifications.method` | tone=silent, config method='terminal' | notify called with `method: 'terminal'` | none |
+| `notify forwards sound + method on LLM-success path` | tone=dry, sound=true, method='both' | notify called with `{sound:true, method:'both'}` | `invokeClaudeP` → `{ok:true, rawOutput:'Go.'}` |
+| `notify forwards sound + method on fallback path` | tone=dry, sound=true, method='terminal', claude times out | notify called with same fields and silent body | `invokeClaudeP` → `{ok:false, reason:'timeout'}` |
+| `claude timeout falls back to silent body` | tone=dry | body byte-identical to silent template, debug log | `invokeClaudeP` → `{ok:false, reason:'timeout'}` |
+| `claude ENOENT falls back` | tone=dry | same, debug log `reason:'enoent'` | `invokeClaudeP` → `{ok:false, reason:'enoent'}` |
+| `claude non-zero exit falls back` | tone=dry | same, debug log `reason:'nonzero'` | `invokeClaudeP` → `{ok:false, reason:'nonzero'}` |
+| `empty-after-normalize falls back` | tone=dry | silent body, debug log "empty after normalize" | `invokeClaudeP` → `{ok:true, rawOutput:'   \n\n '}` |
+| `ConfigValidationError → defaults, still notifies` | pending session, invalid config.toml | exit 0, notify called with a valid body | `invokeClaudeP` mock returns canned output |
+| `consumePendingCheckin reason=not_found` | stdin session_id unknown | exit 0, debug log, no notify | none |
 | `consumePendingCheckin reason=disabled` | pending session marked disabled | exit 0, debug log, no notify | none |
 | `consumePendingCheckin reason=timeout` | forced lock contention | exit 0, warn log, no notify | none |
-| `malformed stdin: empty` | `''` | exit 0, warn log, no state read | none |
-| `malformed stdin: partial JSON` | `'{ "session'` | exit 0, warn log | none |
-| `malformed stdin: null` | `'null'` | exit 0, warn log "not a JSON object" | none |
-| `malformed stdin: true` | `'true'` | same | none |
-| `malformed stdin: array` | `'[]'` | same | none |
-| `malformed stdin: number` | `'42'` | same | none |
+| `malformed stdin: empty / partial / null / true / [] / number` | each as own row | exit 0, warn log, no state read | none |
 | `no stdout` | any happy path | `process.stdout.write` spy records zero bytes | spy |
-| `notify is awaited` | any happy path | `run()` Promise resolves only after `notify` resolves | instrument notify mock with a gated Promise |
+| `notify is awaited` | any happy path | `run()` resolves only after `notify` resolves | gated notify mock |
 
-## 7. Open questions
+### 7b. `normalizeClaudeOutput` unit tests (`tests/hooks/normalize-claude-output.test.ts`)
 
-None unresolved pre-draft. Pre-draft decisions (Q1–Q7 + the 8s timeout and three review concerns) are all baked in above. Any questions surfaced during implementation go here in the Phase 2 PR, not this doc.
+Pure function. No mocks needed.
+
+| Test name | Input | Expected output |
+|---|---|---|
+| `empty string → empty` | `''` | `''` |
+| `whitespace only → empty` | `'   \n\n  '` | `''` |
+| `ANSI only → empty` | `'\x1b[31m\x1b[0m'` | `''` |
+| `single line, trimmed` | `'  Go stretch.  '` | `'Go stretch.'` |
+| `multi-line → first non-empty` | `'\n\nGo stretch.\nSecond line.\n'` | `'Go stretch.'` |
+| `ANSI codes stripped` | `'\x1b[31mgo\x1b[0m for a walk'` | `'go for a walk'` |
+| `ANSI mid-line with multi-line` | `'\n\x1b[32mFirst.\x1b[0m\nSecond.'` | `'First.'` |
+| `exactly 200 chars → pass through` | 200-char string | same string, 200 chars |
+| `201 chars → capped to 200` | 201-char string | first 200 chars |
+| `500 chars → capped to 200` | 500-char string | `.length === 200` |
+
+### 7c. `invokeClaudeP` integration tests (`tests/hooks/invoke-claude-p.integration.test.ts`)
+
+Exercise the real subprocess via a stub script `tests/fixtures/fake-claude.sh` (executable shell script) whose behavior is parameterized by argv or env. The test sets `PATH` so `fake-claude` resolves to our stub, then calls `invokeClaudeP` (with the binary name overridable for tests — see open question below).
+
+| Test name | Stub behavior | Expected `ClaudeResult` |
+|---|---|---|
+| `happy path` | stub writes stdout, exit 0 | `{ok:true, rawOutput:'<stub stdout>'}` |
+| `exit 1` | stub writes stderr, exit 1 | `{ok:false, reason:'nonzero'}` |
+| `ENOENT` | `PATH` set to empty so binary not found | `{ok:false, reason:'enoent'}` |
+| `timeout` | stub sleeps 10s (timeout 8s) | `{ok:false, reason:'timeout'}` |
+| `stderr with zero exit` | stub writes to stderr, exit 0 | `{ok:true, rawOutput:'<stdout>'}` (not a failure) |
+
+The stub script fixture is committed under `tests/fixtures/fake-claude.sh` with executable bit set. Lives alongside other hook fixtures.
+
+## 8. Open questions
+
+One, surfaced by the two-layer split:
+
+- **Q: Binary name injection for `invokeClaudeP` integration tests.** The real helper calls `execFile('claude', …)`. Integration tests need a way to point it at the stub script. Options: (a) export an internal-facing variant `invokeClaudeP(prompt, { binary = 'claude' })` with the binary as an option; (b) rely on `PATH` manipulation alone; (c) a `IDLE_CLAUDE_BINARY` env var read once at call time. Proposal: **(c)** — matches the `IDLE_NOTIFY_PLATFORM` pattern in `notify.ts`, keeps the public signature clean, and is trivially mockable. Accept (c), or pick another option?
+
+No other open questions. Pre-draft decisions (A1–A7 + the 8s timeout + three review concerns + Decisions X/Y/Z) are all baked in above.

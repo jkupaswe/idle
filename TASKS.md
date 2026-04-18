@@ -365,9 +365,9 @@ Reviewer approves the design, then implementation proceeds.
 This ticket composes several established primitives. The specific composition is:
 
 1. **Child process invocation:** Use `child_process.execFile('claude', ['-p', prompt], options)` — **NOT `spawn` or `exec`**. `execFile` prevents shell injection when the prompt contains shell metacharacters (which LLM-generated content can).
-2. **Auth inheritance:** The spawned `claude` process inherits the user's environment. Pass `env: process.env` explicitly and set `timeout: 15000` (15 seconds) in the `execFile` options.
+2. **Auth inheritance:** The spawned `claude` process inherits the user's environment. Pass `env: process.env` explicitly and set `timeout: 8000` (8 seconds) in the `execFile` options. Reasoning: Stop is `async: false`, so the `execFile` timeout is the worst-case user-visible block before the next prompt starts. `claude -p` for a 30-word output typically resolves in 2–5 seconds; 8s leaves headroom, and timeout firings gracefully fall back to the silent-preset body so the user still gets a signal. (Earlier iterations of this ticket specified 15s; reduced to 8s via the T-010 design doc.)
 3. **State reset:** Use `consumePendingCheckin(sessionId)` from `src/core/state.ts`. This helper is atomic and race-safe. Do NOT manually read state, clear the `pending_checkin` flag, and write back — that reintroduces the race the helper was built to solve.
-4. **Notification:** Use `notify({ title, body })` from `src/core/notify.ts`. This is never-throw; do not wrap in try/catch.
+4. **Notification:** Use `notify({ title, body, sound, method })` from `src/core/notify.ts`, forwarding `config.notifications.sound` and `config.notifications.method` on **every** call site (silent-preset success, LLM success, and every fallback). `notify()` is never-throw; do not wrap in try/catch. **Prerequisite:** `notify()` currently only accepts `sound`. Extending `NotifyInput` to accept `method` is a Core-owned change that must land before T-010 implementation starts; tracked in the T-010 design doc under "Prerequisites".
 5. **Prompt templates:** Load from `src/prompts/<tone>.ts` based on the configured tone preset. Each template exports a `buildPrompt(stats)` function (per T-012).
 6. **Silent preset:** If `config.tone.preset === 'silent'`, skip the `claude -p` call entirely and pass the template's direct output string to `notify()`.
 7. **Shipping model:** The hook is invoked as `npx tsx src/hooks/stop.ts # idle:v1`. Do not assume any compiled artifact exists.
@@ -382,9 +382,9 @@ This ticket composes several established primitives. The specific composition is
 4. Load config. Select tone preset.
 5. Build prompt using `buildPrompt(stats)` from the selected template.
 6. If tone is `silent`: pass the template's output directly to `notify()`. Done.
-7. Otherwise: invoke `execFile('claude', ['-p', prompt], { env, timeout: 15000 })`. Capture stdout.
-8. Trim stdout to a single line. Pass to `notify({ title: 'Idle', body: trimmedOutput })`.
-9. On any failure in step 7 (timeout, non-zero exit, stderr noise): fall back to the silent preset's output. Log the failure to debug. Pass fallback to `notify()`.
+7. Otherwise: invoke `execFile('claude', ['-p', prompt], { env, timeout: 8000 })`. Capture stdout.
+8. Normalize stdout (strip ANSI, trim, first non-empty line, cap at 200 chars). Pass to `notify({ title: 'Idle', body: normalizedOutput, sound, method })`, forwarding `config.notifications.sound` and `config.notifications.method`.
+9. On any **hard** failure in step 7 — timeout, ENOENT (binary not on PATH), or non-zero exit — fall back to the silent preset's output. Log the failure to debug. Pass fallback to `notify()` with the same sound/method. **Zero-exit with stderr content is NOT a hard failure**: log the stderr at debug, but use stdout as success. CLI tools commonly emit stderr during normal operation (deprecation warnings, info logs); treating any stderr as failure would cause near-universal fallback. An empty-after-normalize result also falls back to the silent body.
 10. Return (hook completes).
 
 #### Acceptance criteria
@@ -392,11 +392,13 @@ This ticket composes several established primitives. The specific composition is
 - Design doc posted before implementation and approved.
 - Stop hook is configured with `async: false` in settings.json (per established landmarks — it must complete before the session truly ends, so the notification appears at the right moment).
 - All state mutation goes through `consumePendingCheckin`. No raw state access.
-- `execFile` used (not `spawn`, not `exec`). 15-second timeout. Env inherited.
+- `execFile` used (not `spawn`, not `exec`). 8-second timeout. Env inherited.
 - Silent preset short-circuits the LLM call.
-- Fallback path: `claude -p` failure triggers silent-preset output, logs to debug, still calls `notify()` so the user gets *some* signal.
-- Tests cover: happy path with mocked `execFile`, timeout, non-zero exit, silent preset, not-pending short-circuit, invalid session_id.
-- Must complete in reasonable time under normal conditions. A 15s `claude -p` call is acceptable; beyond that, the timeout fires and fallback is used.
+- Fallback path: `claude -p` hard failure (timeout, ENOENT, non-zero exit) triggers silent-preset output, logs to debug, still calls `notify()` with the configured sound/method so the user gets *some* signal. Zero-exit-with-stderr is NOT a hard failure; stdout is used, stderr is logged at debug.
+- `config.notifications.sound` and `config.notifications.method` are forwarded to every `notify()` call (prereq: `NotifyInput` extended in `src/core/notify.ts`).
+- Subprocess concern and output normalization live in two separate layers (`invokeClaudeP` / `normalizeClaudeOutput`) so the pure transforms are unit-testable without a subprocess mock.
+- Tests cover: happy path with mocked `invokeClaudeP`, timeout, non-zero exit, ENOENT, empty-after-normalize, silent preset, not-pending short-circuit, invalid session_id, malformed stdin sub-cases, `stop_hook_active` re-entrancy guard, sound+method forwarding on every call site, ANSI stripping, and the 200-char cap. `normalizeClaudeOutput` has a dedicated pure-function unit test suite. `invokeClaudeP` has integration tests against a stub `fake-claude` script for real execFile / ENOENT / timeout / stderr-zero-exit behavior.
+- Must complete in reasonable time under normal conditions. An 8s `claude -p` call is the worst case; beyond that, the timeout fires and the fallback is used.
 
 #### What NOT to do
 
