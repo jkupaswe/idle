@@ -32,6 +32,7 @@ const {
   escapeAppleScriptString,
   notify,
 } = await import('../../src/core/notify.js');
+import type { NotificationMethod } from '../../src/lib/types.js';
 
 let stderrSpy: ReturnType<typeof vi.spyOn>;
 
@@ -197,6 +198,136 @@ describe('notify (other platforms)', () => {
     await notify({ title: 'Idle', body: 'stub' });
     expect(execFileMock).not.toHaveBeenCalled();
     expect(stderrSpy).toHaveBeenCalledWith('Idle: stub\n');
+  });
+});
+
+describe('notify method: terminal', () => {
+  test('darwin: stderr only, osascript is not spawned', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    await notify({ title: 'Idle', body: 'take a break', method: 'terminal' });
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: take a break\n');
+  });
+
+  test('linux: stderr only, notify-send is not spawned (no `which` either)', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    await notify({ title: 'Idle', body: 'take a break', method: 'terminal' });
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: take a break\n');
+  });
+
+  test('sound is ignored when method is terminal', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    await notify({
+      title: 'Idle',
+      body: 'take a break',
+      sound: true,
+      method: 'terminal',
+    });
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: take a break\n');
+  });
+});
+
+describe('notify method: both', () => {
+  test('darwin: osascript is called AND stderr gets title/body', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+    await notify({ title: 'Idle', body: 'walk', method: 'both' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [cmd, args] = execFileMock.mock.calls[0]!;
+    expect(cmd).toBe('osascript');
+    expect(args[1]).toBe(
+      'display notification "walk" with title "Idle"',
+    );
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: walk\n');
+  });
+
+  test('linux: notify-send is called AND stderr gets title/body', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+    await notify({ title: 'Idle', body: 'stretch', method: 'both' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(2);
+    expect(execFileMock.mock.calls[1]).toEqual([
+      'notify-send',
+      ['--', 'Idle', 'stretch'],
+    ]);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: stretch\n');
+  });
+
+  test('darwin: failing osascript does not suppress stderr line', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockRejectedValue(new Error('osascript boom'));
+
+    await notify({ title: 'Idle', body: 'walk', method: 'both' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: walk\n');
+  });
+
+  test('sound is applied to the native call and stderr still runs', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+    await notify({
+      title: 'Idle',
+      body: 'stretch',
+      sound: true,
+      method: 'both',
+    });
+
+    const [, args] = execFileMock.mock.calls[0]!;
+    expect(args[1]).toContain('sound name "Ping"');
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: stretch\n');
+  });
+
+  test('linux with missing notify-send still writes stderr once', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    execFileMock.mockRejectedValueOnce(new Error('which: not found'));
+
+    await notify({ title: 'Idle', body: 'walk', method: 'both' });
+
+    // `which` was attempted; notify-send itself was not. Stderr fires exactly
+    // once — the missing-tool path must not double-write when method='both'.
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(stderrSpy).toHaveBeenCalledTimes(1);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: walk\n');
+  });
+});
+
+describe('notify method: explicit native and unknown', () => {
+  test("explicit 'native' matches the default (undefined) behavior", async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+    await notify({ title: 'Idle', body: 'walk', method: 'native' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock.mock.calls[0]![0]).toBe('osascript');
+    // Native delivered → no stderr fallback fired.
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  test('unknown method value is treated as native (forward compat)', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+
+    await notify({
+      title: 'Idle',
+      body: 'walk',
+      // Future methods should not break existing builds of notify().
+      method: 'carrier-pigeon' as unknown as NotificationMethod,
+    });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock.mock.calls[0]![0]).toBe('osascript');
+    expect(stderrSpy).not.toHaveBeenCalled();
   });
 });
 
