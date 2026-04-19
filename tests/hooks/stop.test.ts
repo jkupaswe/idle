@@ -264,12 +264,39 @@ describe('stop hook: guards and pre-consume flow', () => {
     );
   });
 
-  test('consume timeout → warn log, no notify', async () => {
+  test('consume timeout → tier-3 notify with config-derived opts (state ambiguous)', async () => {
+    // `_updateState` can return timeout AFTER the atomic write succeeds.
+    // We can't tell from the result whether pending was cleared, so firing
+    // a tier-3 notification is the safer default than risking silent loss.
+    writeConfig({ preset: 'dry', sound: true, method: 'terminal' });
     consumePendingMock.mockResolvedValue({ ok: false, reason: 'timeout' });
     const code = await runStop(stopPayload({ session_id: 'sess_abc123' }));
     expect(code).toBe(0);
-    expect(notifyMock).not.toHaveBeenCalled();
-    expect(readDebugLog()).toMatch(/"msg":"stop: consume timed out"/);
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock.mock.calls[0]![0]).toEqual({
+      title: 'Idle',
+      body: 'Idle check-in',
+      sound: true,
+      method: 'terminal',
+    });
+    expect(readDebugLog()).toMatch(
+      /"msg":"stop: consume timed out; state ambiguous/,
+    );
+  });
+
+  test('consume timeout with broken config → tier-3 notify with defaults', async () => {
+    writeFileSync(join(home, 'config.toml'), 'this =is n0t toml =');
+    consumePendingMock.mockResolvedValue({ ok: false, reason: 'timeout' });
+    await runStop(stopPayload({ session_id: 'sess_abc123' }));
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const arg = notifyMock.mock.calls[0]![0] as {
+      body: string;
+      method: string;
+      sound: boolean;
+    };
+    expect(arg.body).toBe('Idle check-in');
+    expect(arg.method).toBe('native');
+    expect(arg.sound).toBe(false);
   });
 });
 

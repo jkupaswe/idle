@@ -112,7 +112,19 @@ export async function run(input: string): Promise<number> {
           });
           return 0;
         case 'timeout':
-          log('warn', 'stop: consume timed out', { session_id: sessionId });
+          // `_updateState` enforces its deadline both BEFORE and AFTER the
+          // atomic write (see state.internal.ts). A `timeout` result therefore
+          // cannot distinguish "pending flag still set, retry safe" from
+          // "flag already cleared, retry will see not_pending". The second
+          // case silently drops the user's check-in, so we prefer a
+          // possibly-duplicate tier-3 notification over silent loss. The
+          // next Stop will fire again normally if the write never landed.
+          log(
+            'warn',
+            'stop: consume timed out; state ambiguous, firing tier-3 to avoid silent loss',
+            { session_id: sessionId },
+          );
+          await notifyTimeoutTier3();
           return 0;
       }
     }
@@ -208,6 +220,23 @@ function parsePayload(input: string): StopFields | null {
     session_id: obj.session_id,
     ...(stopHookActive !== undefined ? { stop_hook_active: stopHookActive } : {}),
   };
+}
+
+/**
+ * Tier-3 notification for the `consume` timeout branch. Loads config so
+ * `sound` and `method` are forwarded (users with `method='terminal'` are
+ * still honored). `safeLoadConfig` and `notify` are both never-throw; no
+ * try/catch needed. Kept separate from the inner try/catch so the outer
+ * catch still covers it as a last-line-of-defense.
+ */
+async function notifyTimeoutTier3(): Promise<void> {
+  const config = safeLoadConfig();
+  await notify({
+    title: 'Idle',
+    body: 'Idle check-in',
+    sound: config.notifications.sound,
+    method: config.notifications.method,
+  });
 }
 
 function safeLoadConfig(): Readonly<IdleConfig> {
