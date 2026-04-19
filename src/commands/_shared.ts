@@ -1,24 +1,103 @@
-import { existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 
 import type { ConfigParseError, ConfigValidationError } from '../core/config.js';
-import type { InstallResult, UninstallResult } from '../core/settings.js';
+import {
+  IDLE_HOOK_EVENTS,
+  defaultHooksDir,
+  type InstallResult,
+  type UninstallResult,
+} from '../core/settings.js';
 import { claudeSettingsPath } from '../lib/paths.js';
 
 const CLAUDE_URL = 'https://claude.com/product/claude-code';
 
 /**
- * Safety guard for init / install / uninstall. Uses
- * `dirname(claudeSettingsPath())` so the check honors
- * `IDLE_CLAUDE_SETTINGS_PATH` in tests (`claudeHome()` does not).
+ * Full preflight for init / install / uninstall. Per PRD §6.1:
+ * - `~/.claude/` must exist.
+ * - `claude` must be on PATH.
+ * - Idle's own hook scripts must be present (otherwise a "successful"
+ *   install writes dead hook commands that fire and fail).
+ *
+ * Returns true when all three pass. Otherwise prints a terse stderr
+ * line identifying the specific gap and returns false.
  */
-export function ensureClaudeHomeExists(): boolean {
+export function ensureClaudeInstalled(): boolean {
+  if (!ensureClaudeHomeExists()) return false;
+  if (!ensureClaudeOnPath()) return false;
+  if (!ensureHookScriptsPresent()) return false;
+  return true;
+}
+
+/**
+ * Narrower guard used by `uninstall` when the PATH binary isn't
+ * required (removing hooks doesn't need to actually run `claude`).
+ */
+export function ensureClaudeHomeAndHookScripts(): boolean {
+  if (!ensureClaudeHomeExists()) return false;
+  if (!ensureHookScriptsPresent()) return false;
+  return true;
+}
+
+function ensureClaudeHomeExists(): boolean {
   const dir = dirname(claudeSettingsPath());
   if (existsSync(dir)) return true;
   process.stderr.write(
     `~/.claude/ not found. Install Claude Code first: ${CLAUDE_URL}\n`,
   );
   return false;
+}
+
+function ensureClaudeOnPath(): boolean {
+  if (claudeOnPath()) return true;
+  process.stderr.write(
+    `claude not found on PATH. Install Claude Code first: ${CLAUDE_URL}\n`,
+  );
+  return false;
+}
+
+function ensureHookScriptsPresent(): boolean {
+  const dir = defaultHooksDir();
+  for (const hook of IDLE_HOOK_EVENTS) {
+    const abs = join(dir, hook.script);
+    if (existsSync(abs)) continue;
+    process.stderr.write(
+      `idle is missing an internal hook script: ${abs}. Re-install the package.\n`,
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Cross-platform `which claude`. Walks `process.env.PATH` and checks
+ * each entry for an executable. Returns true on the first hit. Honors
+ * `PATHEXT` on Windows so `claude.cmd` / `claude.exe` resolve.
+ */
+function claudeOnPath(): boolean {
+  const rawPath = process.env.PATH ?? '';
+  if (rawPath.length === 0) return false;
+  const candidateNames = executableNames('claude');
+  for (const dir of rawPath.split(delimiter)) {
+    if (dir.length === 0) continue;
+    for (const name of candidateNames) {
+      try {
+        accessSync(join(dir, name), fsConstants.X_OK);
+        return true;
+      } catch {
+        // keep walking
+      }
+    }
+  }
+  return false;
+}
+
+function executableNames(base: string): string[] {
+  if (process.platform !== 'win32') return [base];
+  const pathext = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .filter((s) => s.length > 0);
+  return [base, ...pathext.map((ext) => `${base}${ext.toLowerCase()}`)];
 }
 
 /**
@@ -70,11 +149,6 @@ export function formatUninstallResult(result: UninstallResult): number {
   return 1;
 }
 
-/**
- * Shared formatter for the three Core failure reasons that install and
- * uninstall have in common: `permission_denied`, `malformed_settings`,
- * `timeout`. Each maps to a terse stderr line.
- */
 function writeSettingsFailure(
   reason: 'permission_denied' | 'malformed_settings' | 'timeout',
   detail: string,
@@ -98,11 +172,6 @@ function writeSettingsFailure(
   }
 }
 
-/**
- * Map a `ConfigParseError` or `ConfigValidationError` to the install
- * command's stderr lines. The second line tells the user how to recover,
- * which is why it lives here and not inside the error class.
- */
 export function writeConfigLoadError(
   err: ConfigParseError | ConfigValidationError,
 ): void {

@@ -9,7 +9,7 @@ import type {
   TonePreset,
 } from '../lib/types.js';
 
-import { ensureClaudeHomeExists, formatInstallResult } from './_shared.js';
+import { ensureClaudeInstalled, formatInstallResult } from './_shared.js';
 
 interface InitAnswers {
   tonePreset: TonePreset;
@@ -41,7 +41,7 @@ export function register(program: Command): void {
 }
 
 export async function runInit(): Promise<number> {
-  if (!ensureClaudeHomeExists()) return 1;
+  if (!ensureClaudeInstalled()) return 1;
 
   // Lazy-load: keeps `idle --version` out of the prompts bundle.
   const { default: prompts } = await import('prompts');
@@ -106,7 +106,10 @@ export async function runInit(): Promise<number> {
     projects: {},
   };
 
-  saveConfig(config);
+  // Hooks first, config second — a failed install must not leave a
+  // stray config.toml behind (PRD §6.1 "restore exact prior state").
   const result = await installHooks();
+  if (!result.ok) return formatInstallResult(result);
+  saveConfig(config);
   return formatInstallResult(result);
 }

@@ -88,4 +88,36 @@ describe('runInit', () => {
 
     restore();
   });
+
+  test('refuses to run when `claude` is not on PATH', async () => {
+    ctx.removeClaudeFromPath();
+    prompts.inject(['dry', 45, 40, 'native', true]);
+
+    const code = await runInit();
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('claude not found on PATH');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
+  test('refuses to run when an internal hook script is missing', async () => {
+    ctx.removeHookScript('stop.ts');
+    prompts.inject(['dry', 45, 40, 'native', true]);
+
+    const code = await runInit();
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toMatch(
+      /idle is missing an internal hook script: .*stop\.ts/,
+    );
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
+  test('install failure leaves no stray config.toml behind (PRD §6.1)', async () => {
+    writeFileSync(ctx.settingsPath, 'not json {');
+    prompts.inject(['absurdist', 90, 20, 'both', true]);
+
+    const code = await runInit();
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('Could not read');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
 });

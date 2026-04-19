@@ -108,4 +108,47 @@ describe('runUninstall --purge', () => {
 
     mkdirSync(ctx.sandboxIdle, { recursive: true });
   });
+
+  test('--yes bypasses the confirm prompt', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), '[tone]\npreset = "dry"\n');
+    await runInstall({});
+    ctx.captured.stdout = '';
+
+    const code = await runUninstall({ purge: true, yes: true });
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toContain('Uninstalled.');
+    expect(ctx.captured.stdout).toContain('Purged ~/.idle/.');
+    expect(existsSync(ctx.sandboxIdle)).toBe(false);
+  });
+
+  test('non-TTY --purge without --yes fails before touching settings.json', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), '[tone]\npreset = "dry"\n');
+    await runInstall({});
+    const settingsBefore = readFileSync(ctx.settingsPath, 'utf8');
+    ctx.captured.stdout = '';
+    ctx.setStdinTty(false);
+
+    const code = await runUninstall({ purge: true });
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('--purge requires confirmation');
+    expect(ctx.captured.stderr).toContain('--yes');
+    // Settings file must be untouched — half-uninstall is worse than no-op.
+    expect(readFileSync(ctx.settingsPath, 'utf8')).toBe(settingsBefore);
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(true);
+  });
+
+  test('non-TTY --purge --yes purges without prompting', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), '[tone]\npreset = "dry"\n');
+    await runInstall({});
+    ctx.captured.stdout = '';
+    ctx.setStdinTty(false);
+
+    const code = await runUninstall({ purge: true, yes: true });
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toContain('Purged ~/.idle/.');
+    expect(existsSync(ctx.sandboxIdle)).toBe(false);
+  });
 });

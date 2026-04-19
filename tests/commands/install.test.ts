@@ -126,6 +126,38 @@ describe('runInstall', () => {
     restore();
   });
 
+  test('refuses to run when `claude` is not on PATH (PRD §6.1)', async () => {
+    ctx.removeClaudeFromPath();
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('claude not found on PATH');
+    expect(ctx.captured.stdout).toBe('');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
+  test('refuses to run when an internal hook script is missing', async () => {
+    ctx.removeHookScript('stop.ts');
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toMatch(
+      /idle is missing an internal hook script: .*stop\.ts/,
+    );
+    expect(ctx.captured.stdout).toBe('');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+    expect(existsSync(ctx.settingsPath)).toBe(false);
+  });
+
+  test('settings.json failure does not leave a stray config.toml (PRD §6.1)', async () => {
+    writeFileSync(ctx.settingsPath, 'this is {not valid json at all');
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('Could not read');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
   test('prints a clean error when the existing config is malformed', async () => {
     mkdirSync(ctx.sandboxIdle, { recursive: true });
     writeFileSync(join(ctx.sandboxIdle, 'config.toml'), 'garbage = = broken');

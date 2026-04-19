@@ -11,9 +11,10 @@ import {
 } from '../core/config.js';
 import { installHooks } from '../core/settings.js';
 import { idleConfigPath } from '../lib/paths.js';
+import type { IdleConfig } from '../lib/types.js';
 
 import {
-  ensureClaudeHomeExists,
+  ensureClaudeInstalled,
   formatInstallResult,
   writeConfigLoadError,
 } from './_shared.js';
@@ -33,32 +34,52 @@ export function register(program: Command): void {
     });
 }
 
-export async function runInstall(options: InstallCliOptions): Promise<number> {
-  if (!ensureClaudeHomeExists()) return 1;
+interface PlannedConfig {
+  /** The config to write when install succeeds. Null means keep on-disk config. */
+  write: IdleConfig | null;
+  /** Optional middle sentence in the success output. */
+  note?: string;
+}
 
+export async function runInstall(options: InstallCliOptions): Promise<number> {
+  if (!ensureClaudeInstalled()) return 1;
+
+  const plan = resolveConfigPlan(options);
+  if (plan === 'config_error') return 1;
+
+  // Hooks first, config second — a failed install must not leave a
+  // stray or reset config.toml on disk.
+  const result = await installHooks();
+  if (!result.ok) return formatInstallResult(result);
+  if (plan.write !== null) saveConfig(plan.write);
+  return formatInstallResult(result, plan.note);
+}
+
+function resolveConfigPlan(
+  options: InstallCliOptions,
+): PlannedConfig | 'config_error' {
   const hadConfig = existsSync(idleConfigPath());
-  let configNote: string | undefined;
 
   if (options.defaults === true) {
-    saveConfig(defaultConfig());
-    if (hadConfig) configNote = 'Config reset to defaults.';
-  } else if (!hadConfig) {
-    saveConfig(defaultConfig());
-  } else {
-    // Validate the existing config before preserving it — a malformed
-    // config is a user-visible error, not a silent overwrite.
-    try {
-      loadConfig();
-    } catch (err) {
-      if (err instanceof ConfigValidationError || err instanceof ConfigParseError) {
-        writeConfigLoadError(err);
-        return 1;
-      }
-      throw err;
-    }
-    configNote = 'Existing config preserved.';
+    return {
+      write: defaultConfig(),
+      note: hadConfig ? 'Config reset to defaults.' : undefined,
+    };
+  }
+  if (!hadConfig) {
+    return { write: defaultConfig() };
   }
 
-  const result = await installHooks();
-  return formatInstallResult(result, configNote);
+  // Existing config path: validate before preserving — a malformed
+  // config is a user-visible error, not a silent overwrite.
+  try {
+    loadConfig();
+  } catch (err) {
+    if (err instanceof ConfigValidationError || err instanceof ConfigParseError) {
+      writeConfigLoadError(err);
+      return 'config_error';
+    }
+    throw err;
+  }
+  return { write: null, note: 'Existing config preserved.' };
 }
