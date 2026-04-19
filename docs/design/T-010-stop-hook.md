@@ -64,7 +64,7 @@ Tests and fixtures:
 - **`tests/hooks/stop.test.ts`** — hook-level flow and fallback tests.
 - **`tests/hooks/invoke-claude-p.test.ts`** — subprocess helper tests, split into **UNIT** describe block (mocks `node:child_process`) and **INTEGRATION** describe block (real `execFile` against the fixture below).
 - **`tests/hooks/normalize-claude-output.test.ts`** — pure-function unit tests; no mocks.
-- **`tests/fixtures/fake-claude-p.mjs`** — Node script fixture (cross-platform; not a shell script). Accepts `--stdout <text>`, `--stderr <text>`, `--exit <N>`, `--sleep-ms <N>`. Invoked from integration tests as `execClaudeLike(process.execPath, [fixturePath, ...flags], timeoutMs)`.
+- **`tests/fixtures/fake-claude-p.mjs`** — Node script fixture (cross-platform; not a shell script). Accepts `--stdout <text>`, `--stderr <text>`, `--exit <N>`, `--sleep-ms <N>`, and `--self-kill-after-ms <N>` (self-signals `SIGKILL` via `process.kill(process.pid, 'SIGKILL')` after N ms — used by the killed-signal integration test so `execClaudeLike`'s return contract doesn't need to expose the child handle). Invoked from integration tests as `execClaudeLike(process.execPath, [fixturePath, ...flags], timeoutMs)`.
 - **`tests/fixtures/stop-*.json`** — synthetic hook payloads.
 
 No new on-disk types. Reused shapes imported as-is:
@@ -179,16 +179,7 @@ Pipeline, in order:
   - `last_tool_name` / `last_tool_summary`: passthrough; templates sanitize via `renderLastTool` → `sanitizeUntrustedField`.
   - **Subagent counters NOT summed.** F-003 deferred.
   - `last_assistant_message` **ignored** in v1.
-- **Notification options (Decision X):** every call site spreads the same `notifOpts`:
-  ```ts
-  const notifOpts = {
-    title: 'Idle',
-    sound: config.notifications.sound,
-    method: config.notifications.method,
-  } as const;
-  await notify({ ...notifOpts, body });
-  ```
-  Applied on silent-preset success, LLM success, and every fallback. `method` is honored only after P-1 lands.
+- **Notification options (Decision X):** every `notify()` call spreads `notifOpts = { title:'Idle', sound: config.notifications.sound, method: config.notifications.method }` and supplies its own `body`. Applied on silent success, LLM success, tier-2 fallbacks, and the tier-3 inner-catch fallback (see §5). `method` is honored only after P-1 lands.
 - **Silent short-circuit:** if `config.tone.preset === 'silent'` after config + stats, `await notify({ ...notifOpts, body: TEMPLATES.silent(stats) })` and return 0. No child process, no LLM cost.
 
 ## 5. Flow + two-phase try/catch (no silent-loss guarantee)
@@ -200,17 +191,21 @@ Once `consumePendingCheckin` returns `{ ok: true }`, the `pending_checkin` flag 
 Body strings used by `notify()` come in three tiers:
 
 1. **Happy path:** `normalizeClaudeOutput(result.rawOutput)` — the LLM sentence.
-2. **Known-failure fallback:** `TEMPLATES.silent(stats)` — the silent-preset output (`"<m>m / <n> tool calls"`). Used on `invokeClaudeP` non-ok results, normalize-empty, and `ConfigValidationError`. Requires `stats` and thus `buildStats` to have succeeded.
-3. **Degraded fallback:** the literal string **`"Idle check-in"`** with notify opts `{ title: 'Idle', body: 'Idle check-in' }` (no `sound`, no `method`). Used only by the inner catch when post-consume work threw before we had usable `notifOpts`/`silentBody`. Does not depend on any post-consume work.
+2. **Known-failure fallback:** `TEMPLATES.silent(stats)` — the silent-preset output (`"<m>m / <n> tool calls"`). Used on `invokeClaudeP` non-ok results and normalize-empty. Requires `stats` and thus `buildStats` to have succeeded.
+3. **Degraded fallback:** the literal string **`"Idle check-in"`**. Used only by the inner catch when post-consume work threw before `silentBody` could be constructed. `notifOpts` (sound/method forwarded from config) are carried through if config loaded — only in the unreachable case where `safeLoadConfig` itself threw do we fall back to the bare `{ title: 'Idle', body: 'Idle check-in' }` with no sound/method.
 
-The degraded body is voice-consistent (dry, terse), independent of any post-consume state, and distinguishable in the debug log so operators can tell "tier 3 fired" from "config threw, tier 2".
+### Carrying `notifOpts` into tier 3
+
+The inner try's first step is to declare `let notifOpts = { title: 'Idle', body: 'Idle check-in' }` (the bare seed). The second step is `safeLoadConfig()`; on return, `notifOpts` is immediately updated to `{ ...notifOpts, sound: config.notifications.sound, method: config.notifications.method }`. Every subsequent throw (buildStats, TEMPLATES.silent, tone dispatch, invokeClaudeP, normalizeClaudeOutput, final notify) lands in the inner catch with `notifOpts` carrying the full sound+method forwarding. The catch fires `await notify({ ...notifOpts, body: 'Idle check-in' })`.
+
+This preserves Decision X: a user with `method='terminal'` still gets a terminal-only tier-3 notification instead of a native popup. The only case that falls back to the bare shape is `safeLoadConfig` itself throwing — unreachable under the post-tool-use pattern, which catches every error internally and returns defaults. Debug log distinguishes "tier 3, config loaded" from "tier 3, config itself threw".
 
 ### Two try/catch layers
 
 - **Outer (pre-consume) catch** — wraps stdin parse, guards, and `consumePendingCheckin` itself. On unexpected throw: log at `error`, exit 0 with **no notify**. The pending flag is still set, so the next Stop fires the check-in cleanly.
-- **Inner (post-consume) catch** — the `[INNER TRY]` boundary starts **immediately** after `consumePendingCheckin` returns `{ ok: true }`, before any other post-consume work. It wraps `safeLoadConfig`, `buildStats`, `TEMPLATES.silent(stats)`, `notifOpts` construction, the silent short-circuit `notify`, tone dispatch (`TEMPLATES[preset](stats)`), `invokeClaudeP`, `normalizeClaudeOutput`, and the final `notify` call. On unexpected throw: log at `error` with the throwing phase identified in the message, then `await notify({ title: 'Idle', body: 'Idle check-in' })` (tier 3), exit 0. The pending flag is already cleared; the user still sees a signal.
+- **Inner (post-consume) catch** — the `[INNER TRY]` boundary starts **immediately** after `consumePendingCheckin` returns `{ ok: true }`. It wraps every post-consume step: the initial `notifOpts` seed, `safeLoadConfig`, the `notifOpts` update, `buildStats`, `TEMPLATES.silent(stats)`, the silent short-circuit `notify`, tone dispatch (`TEMPLATES[preset](stats)`), `invokeClaudeP`, `normalizeClaudeOutput`, and the final `notify`. On unexpected throw: log at `error`, then `await notify({ ...notifOpts, body: 'Idle check-in' })` (tier 3), exit 0.
 
-`notify()` is placed **inside** the inner try, not outside. CLAUDE.md's never-throw contract makes this defense-in-depth rather than strictly necessary — a hypothetical future P-1 implementation that breaks the contract would still be recoverable because the catch would fire with the degraded fallback. The catch itself calls `notify()` exactly once with the tier-3 body; if that call also throws (contract violation by the Core primitive), it propagates to the outer catch, which logs and exits. That chained-failure path is unreachable under the contract and is not engineered around further.
+`notify()` is placed **inside** the inner try, not outside. CLAUDE.md's never-throw contract makes this defense-in-depth. The catch calls `notify()` exactly once; if that call violates the contract and throws, it propagates to the outer catch, which logs and exits. That chained-failure path is unreachable under the contract and is not engineered around further.
 
 ### Flow diagram
 
@@ -243,10 +238,11 @@ await consumePendingCheckin(sessionId)
        [INNER TRY — post-consume; boundary starts HERE]
          │
          ▼
-       config     = safeLoadConfig()                     (throw → INNER CATCH)
-       stats      = buildStats(entry)                    (throw → INNER CATCH)
-       silentBody = TEMPLATES.silent(stats)              (throw → INNER CATCH)
-       notifOpts  = { title:'Idle', sound, method }      (throw → INNER CATCH)
+       notifOpts = { title:'Idle', body:'Idle check-in' }  (bare seed; updated below)
+       config    = safeLoadConfig()                        (throw → INNER CATCH; notifOpts still bare)
+       notifOpts = { ...notifOpts, sound, method }         (carry forwarded; throw-safe assignment)
+       stats     = buildStats(entry)                       (throw → INNER CATCH; notifOpts has sound/method)
+       silentBody= TEMPLATES.silent(stats)                 (throw → INNER CATCH; notifOpts has sound/method)
          │
          ▼
        config.tone.preset === 'silent'?
@@ -270,14 +266,14 @@ await consumePendingCheckin(sessionId)
                 │
                 └── body !== '' → await notify({ ...notifOpts, body }), exit 0              [tier 1]
        [INNER CATCH] → log error 'stop: post-consume unexpected throw',
-                        await notify({ title:'Idle', body: 'Idle check-in' }),              [tier 3]
-                        exit 0
+                        await notify({ ...notifOpts, body: 'Idle check-in' }),              [tier 3]
+                        exit 0    (notifOpts carries sound/method iff config loaded before throw)
 [OUTER CATCH] → log error 'stop: pre-consume unexpected throw', exit 0 (no notify; pending still set)
 ```
 
-### Why `stop_hook_active` is at step 2, not later
+### Why `stop_hook_active` is at step 2
 
-Runs **before** `consumePendingCheckin`. Re-entrant Stop fires (hook's own `claude -p` nesting, or Claude Code re-firing Stop) **must not consume the pending flag** — clearing it from the wrong invocation would silently drop the user's check-in. Load-bearing ordering; protect against future reordering. CLAUDE.md compliance: the inner try wraps `notify()` as defense-in-depth; the inner catch itself is not wrapped and trusts the never-throw contract. `log()` is never wrapped anywhere. No try/catch is added at the primitive level — wrapping is at the flow boundary (post-consume work).
+Runs **before** `consumePendingCheckin`. Re-entrant Stop fires must not consume the pending flag — clearing from the wrong invocation would silently drop the user's check-in. Load-bearing ordering; protect against future reordering. CLAUDE.md compliance: inner try wraps `notify()` as defense-in-depth; inner catch itself trusts the never-throw contract. `log()` is never wrapped. Wrapping is at the flow boundary, not at the primitive level.
 
 ## 6. Error handling matrix
 
@@ -298,11 +294,12 @@ Runs **before** `consumePendingCheckin`. Re-entrant Stop fires (hook's own `clau
 | `claude` non-zero exit | `err.code !== 0` | silent body | `debug` with exit code + stderr | silent body |
 | `claude` zero exit, stderr non-empty | zero exit + stderr content | stdout used as rawOutput | `debug` with stderr | LLM output |
 | `normalizeClaudeOutput` returns `''` | `body === ''` | silent body | `debug` | silent body (tier 2) |
-| `buildStats` throws | post-consume inner try | tier 3 degraded fallback | `error` "stop: post-consume unexpected throw (buildStats)" | **`"Idle check-in"` via `notify({title:'Idle', body:'Idle check-in'})`** |
-| `TEMPLATES.silent(stats)` or `TEMPLATES[tone](stats)` throws | inner try | tier 3 degraded fallback | `error` "stop: post-consume unexpected throw (template)" | `"Idle check-in"` |
-| `normalizeClaudeOutput(raw)` throws | inner try | tier 3 degraded fallback | `error` "stop: post-consume unexpected throw (normalize)" | `"Idle check-in"` |
-| `invokeClaudeP(prompt)` throws (contract violation — it should return a union) | inner try | tier 3 degraded fallback | `error` "stop: post-consume unexpected throw (invoke)" | `"Idle check-in"` |
-| **Inner catch (any other post-consume unexpected)** | `try/catch` around all post-consume work | tier 3 degraded fallback | `error` with stack | `"Idle check-in"` — **no silent loss** |
+| `safeLoadConfig` throws (unreachable under the post-tool-use pattern, but bounds the contract) | inner try | tier 3 bare — `notify({title:'Idle', body:'Idle check-in'})` | `error` "stop: post-consume unexpected throw (config)" | `"Idle check-in"` via default native method |
+| `buildStats` throws | inner try | tier 3 — `notify({...notifOpts, body:'Idle check-in'})` with sound/method carried | `error` "stop: post-consume unexpected throw (buildStats)" | **`"Idle check-in"` via configured method** |
+| `TEMPLATES.silent(stats)` or `TEMPLATES[tone](stats)` throws | inner try | tier 3 with sound/method carried | `error` "stop: post-consume unexpected throw (template)" | `"Idle check-in"` via configured method |
+| `normalizeClaudeOutput(raw)` throws | inner try | tier 3 with sound/method carried | `error` "stop: post-consume unexpected throw (normalize)" | `"Idle check-in"` via configured method |
+| `invokeClaudeP(prompt)` throws (contract violation — it should return a union) | inner try | tier 3 with sound/method carried | `error` "stop: post-consume unexpected throw (invoke)" | `"Idle check-in"` via configured method |
+| **Inner catch (any other post-consume unexpected)** | `try/catch` around all post-consume work | tier 3 with sound/method carried if config loaded, else bare | `error` with stack | `"Idle check-in"` — **no silent loss** |
 
 `notify()` itself never throws (CLAUDE.md contract); omitted from the matrix. If the P-1 `notify()` extension ever breaks that contract, the inner catch's final `notify()` call may itself throw; that propagates to the outer catch which logs and exits without further recovery (bounded by the contract).
 
@@ -330,8 +327,10 @@ Drive `run(input: string)` directly. Mock `invokeClaudeP` via `vi.mock('../../sr
 | `ConfigValidationError → defaults, still notifies` | invalid config.toml | exit 0, notify called with valid body | `invokeClaudeP` canned output |
 | `consumePendingCheckin reason=not_found / disabled / timeout` (3 rows) | forced cause | exit 0, no notify | none |
 | `malformed stdin: empty / partial / null / true / [] / number` (6 rows) | each | exit 0, warn log, no state read | none |
-| **`post-consume unexpected throw from invokeClaudeP → degraded notify`** | tone=dry, force `invokeClaudeP` mock to throw (not return union) | exit 0, error log, `notify({title:'Idle', body:'Idle check-in'})` (tier 3) | `invokeClaudeP` mock throws synchronous Error |
-| **`post-consume unexpected throw from normalizeClaudeOutput → degraded notify`** | tone=dry, `invokeClaudeP` returns ok but `normalizeClaudeOutput` mock throws | exit 0, error log, tier-3 degraded notify | `vi.mock('../../src/hooks/normalize-claude-output.js')` with a throwing impl |
+| **`tier 3 via invokeClaudeP throw — carries sound+method`** | tone=dry, sound=true, method='both', `invokeClaudeP` mock throws | exit 0, `notify({title:'Idle', body:'Idle check-in', sound:true, method:'both'})` | `invokeClaudeP` throws |
+| **`tier 3 via normalizeClaudeOutput throw — carries method='terminal'`** | tone=dry, method='terminal', normalize mock throws after `invokeClaudeP` ok | exit 0, tier-3 body with `method:'terminal'` (no native popup) | `vi.mock('../../src/hooks/normalize-claude-output.js')` throws |
+| **`tier 3 via TEMPLATES.silent throw BEFORE silentBody exists — carries method='terminal'`** | tone=dry, method='terminal', `src/prompts/silent.js` `buildPrompt` mocked to throw | exit 0, tier-3 body with `method:'terminal'`; **proves config-derived opts carry even when silentBody never constructed** | `vi.mock('../../src/prompts/silent.js', …)` throws |
+| **`tier 3 via TEMPLATES[tone] throw — carries sound+method`** | tone=dry, method='terminal', `src/prompts/dry.js` `buildPrompt` mocked to throw | exit 0, tier-3 with `method:'terminal'` | `vi.mock('../../src/prompts/dry.js', …)` throws |
 | **`pre-consume unexpected throw → NO notify, no flag clear`** | force `consumePendingCheckin` to throw (e.g., mock `state.ts`) | exit 0, error log, `notify` NOT called | mock `consumePendingCheckin` throws |
 | `no stdout` | any happy path | `process.stdout.write` spy records zero bytes | spy |
 | `notify is awaited` | any happy path | `run()` resolves only after `notify` resolves | gated notify mock |
@@ -387,10 +386,8 @@ Fixture `tests/fixtures/fake-claude-p.mjs` flags: `--stdout <text>`, `--stderr <
 | `ENOENT` | `execClaudeLike('/definitely/not/a/binary', [], 2_000)` | `{ok:false, reason:'enoent'}` |
 | `non-zero exit` | `--stderr "boom" --exit 1`, timeout 2_000 | `{ok:false, reason:'nonzero'}`; stderr observable in debug log |
 | `stderr with zero exit` | `--stderr "DeprecationWarning" --stdout "ok" --exit 0`, timeout 2_000 | `{ok:true, rawOutput:'ok'}`; stderr logged at debug |
-| `killed signal` | fixture sleeps; test sends SIGKILL to the child mid-run via `child.kill('SIGKILL')` (test grabs handle through a small helper hook, or uses a longer `--sleep-ms` and `execFileP`'s own pid) | `{ok:false, reason:'killed'}` |
+| `killed signal` | `--self-kill-after-ms 100 --sleep-ms 2000`, timeout 5_000; fixture signals `SIGKILL` to itself 100ms in | `{ok:false, reason:'killed'}` — `execClaudeLike` observes the kill signal without needing to expose the child handle |
 
 ## 8. Open questions
 
-None. Prior-round concerns resolved: `IDLE_CLAUDE_BINARY` is not added (integration tests call `execClaudeLike(process.execPath, [fixturePath, …], timeoutMs)` directly; `execClaudeLike` is module-local, not used by the production hook). Degraded-fallback body is the literal `"Idle check-in"` with notify opts `{title:'Idle', body:'Idle check-in'}` — no sound/method forwarded in this tier because config may not have loaded. `[INNER TRY]` boundary starts immediately after `consumePendingCheckin` success, wrapping every post-consume step through the final `notify`.
-
-Anything surfaced during Phase 2 goes in the implementation PR, not this doc.
+None. Prior rounds resolved: no `IDLE_CLAUDE_BINARY` (integration tests use the module-local `execClaudeLike` helper); tier-3 body is `"Idle check-in"` and `notifOpts` carries sound+method through from config for every reachable throw point; `[INNER TRY]` starts immediately after consume; killed-signal integration uses a `--self-kill-after-ms` fixture flag. Anything surfaced during Phase 2 goes in the implementation PR.
