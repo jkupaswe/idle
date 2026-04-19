@@ -17,6 +17,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { log } from '../lib/log.js';
+import type { NotificationMethod } from '../lib/types.js';
 
 const execFileP = promisify(execFile);
 
@@ -27,37 +28,59 @@ export interface NotifyInput {
   body: string;
   /** When true and the platform supports it, play a sound. */
   sound?: boolean;
+  /**
+   * Delivery channel. Defaults to `'native'` (platform notifier with a
+   * stderr fallback). `'terminal'` writes only to stderr, `'both'` attempts
+   * native and writes to stderr independently. Unknown values are treated
+   * as `'native'` for forward compatibility.
+   */
+  method?: NotificationMethod;
 }
 
 /**
- * Trigger a native OS notification. Resolves regardless of delivery outcome;
- * failures are logged and fall back to stderr.
+ * Trigger a notification. Resolves regardless of delivery outcome; failures
+ * are logged. Dispatches on `input.method`:
+ *
+ * - `'native'` (default / unknown value): platform notifier with a stderr
+ *   fallback on failure or on platforms that lack one.
+ * - `'terminal'`: stderr only. The platform notifier is never invoked.
+ * - `'both'`: native (best-effort) AND stderr. A native failure does not
+ *   suppress the terminal line, and vice versa.
  */
 export async function notify(input: NotifyInput): Promise<void> {
-  const { title, body } = input;
+  const { title, body, method } = input;
+
+  if (method === 'terminal') {
+    writeStderr(title, body);
+    return;
+  }
+
   const platform = currentPlatform();
+  let nativeDelivered = false;
 
   try {
     if (platform === 'darwin') {
       await sendMac(input);
-      return;
-    }
-    if (platform === 'linux') {
+      nativeDelivered = true;
+    } else if (platform === 'linux') {
       if (await hasNotifySend()) {
         await sendLinux(input);
-        return;
+        nativeDelivered = true;
+      } else {
+        log('warn', 'notify: notify-send not found');
       }
-      log('warn', 'notify: notify-send not found; falling back to stderr');
-      writeStderr(title, body);
-      return;
     }
-    // Windows (v2) and anything else: stderr is the only sane default.
-    writeStderr(title, body);
+    // Windows (v2) and any other platform: no native path available.
   } catch (err) {
-    log('warn', 'notify: delivery failed, falling back to stderr', {
+    log('warn', 'notify: native delivery failed', {
       platform,
       error: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  // 'both': always also write stderr, independent of native outcome.
+  // Default / 'native' / unknown: stderr only when native didn't deliver.
+  if (method === 'both' || !nativeDelivered) {
     writeStderr(title, body);
   }
 }
