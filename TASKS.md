@@ -343,7 +343,7 @@ These decisions are settled across Core Wave 2 and apply to all remaining ticket
 ### T-010: Stop hook with prompt output (Hooks)
 
 **Depends on:** T-004, T-005, T-007, T-012
-**Files:** `src/hooks/stop.ts`, `tests/hooks/stop.test.ts`, `tests/fixtures/stop-*.json`
+**Files:** `src/hooks/stop.ts`, `src/hooks/invoke-claude-p.ts`, `src/hooks/normalize-claude-output.ts`, `tests/hooks/stop.test.ts`, `tests/hooks/invoke-claude-p.test.ts`, `tests/hooks/normalize-claude-output.test.ts`, `tests/fixtures/stop-*.json`, `tests/fixtures/fake-claude-p.mjs`
 
 **Description:** Fires when the agent stops responding. If a check-in is pending, generates a break suggestion via `claude -p` and triggers a native notification.
 
@@ -397,8 +397,8 @@ This ticket composes several established primitives. The specific composition is
 - Fallback path: `claude -p` hard failure (timeout, ENOENT, non-zero exit) triggers silent-preset output, logs to debug, still calls `notify()` with the configured sound/method so the user gets *some* signal. Zero-exit-with-stderr is NOT a hard failure; stdout is used, stderr is logged at debug.
 - `config.notifications.sound` and `config.notifications.method` are forwarded to every `notify()` call (prereq: `NotifyInput` extended in `src/core/notify.ts`).
 - Subprocess concern and output normalization live in two separate **modules** (`src/hooks/invoke-claude-p.ts` and `src/hooks/normalize-claude-output.ts`) so each has a real ESM import seam for mocking and the pure transforms are unit-testable without any subprocess involvement.
-- Post-consume error paths notify with the silent-preset body rather than exiting silently, so an unexpected bug downstream of `consumePendingCheckin` cannot drop a user-visible check-in. Pre-consume unexpected exceptions still exit without notifying (pending flag uncleared; next Stop delivers).
-- Tests cover: happy path with mocked `invokeClaudeP`, timeout, non-zero exit, ENOENT, empty-after-normalize, silent preset, not-pending short-circuit, invalid session_id, malformed stdin sub-cases, `stop_hook_active` re-entrancy guard, sound+method forwarding on every call site, ANSI stripping, and the 200-char cap. `normalizeClaudeOutput` has a dedicated pure-function unit test suite. `invokeClaudeP` has integration tests against a stub `fake-claude` script for real execFile / ENOENT / timeout / stderr-zero-exit behavior.
+- Post-consume error paths notify rather than exiting silently, so an unexpected bug downstream of `consumePendingCheckin` cannot drop a user-visible check-in. Known-failure paths (invokeClaudeP non-ok, normalize-empty) use the silent-preset body; the inner catch uses a degraded body `"Idle check-in"` that depends on no post-consume state. Pre-consume unexpected exceptions still exit without notifying (pending flag uncleared; next Stop delivers).
+- Tests cover: happy path with mocked `invokeClaudeP`, timeout, non-zero exit, ENOENT, empty-after-normalize, silent preset, not-pending short-circuit, invalid session_id, malformed stdin sub-cases, `stop_hook_active` re-entrancy guard, sound+method forwarding on every call site, ANSI stripping, the 200-char cap, and both the `invokeClaudeP`-throws and `normalizeClaudeOutput`-throws post-consume degraded-fallback paths. `normalizeClaudeOutput` has a dedicated pure-function unit test suite. `invokeClaudeP`'s test file has a **UNIT** describe block that mocks `node:child_process` (argv, options, error-shape mapping) and an **INTEGRATION** describe block that exercises real `execFile` against `tests/fixtures/fake-claude-p.mjs` (happy path, real timeout, real ENOENT against a missing binary, non-zero exit, stderr-with-zero-exit, killed signal).
 - Must complete in reasonable time under normal conditions. An 8s `claude -p` call is the worst case; beyond that, the timeout fires and the fallback is used.
 
 #### What NOT to do
