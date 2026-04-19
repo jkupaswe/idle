@@ -1,0 +1,162 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { describe, expect, test } from 'vitest';
+
+import { runInstall } from '../../src/commands/install.js';
+import { IDLE_TAG } from '../../src/core/settings.js';
+
+import { readToml, simulateMissingClaudeHome, useCliSandbox } from './_harness.js';
+
+const ctx = useCliSandbox('install');
+
+function writeCustomConfig(): void {
+  const customized = [
+    '[thresholds]',
+    'time_minutes = 90',
+    'tool_calls = 20',
+    '',
+    '[tone]',
+    'preset = "absurdist"',
+    '',
+    '[notifications]',
+    'method = "both"',
+    'sound = true',
+    '',
+  ].join('\n');
+  mkdirSync(ctx.sandboxIdle, { recursive: true });
+  writeFileSync(join(ctx.sandboxIdle, 'config.toml'), customized);
+}
+
+describe('runInstall', () => {
+  test('writes default config and installs hooks on first run', async () => {
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toBe('Installed.\n');
+    expect(ctx.captured.stderr).toBe('');
+
+    const config = readToml(join(ctx.sandboxIdle, 'config.toml'));
+    expect(config).toMatchObject({
+      thresholds: { time_minutes: 45, tool_calls: 40 },
+      tone: { preset: 'dry' },
+      notifications: { method: 'native', sound: false },
+    });
+    expect(readFileSync(ctx.settingsPath, 'utf8')).toContain(IDLE_TAG);
+  });
+
+  test('--defaults on a fresh install emits "Installed." (no reset note)', async () => {
+    const code = await runInstall({ defaults: true });
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toBe('Installed.\n');
+  });
+
+  test('--defaults overwrites an existing config with reset note', async () => {
+    writeCustomConfig();
+
+    const code = await runInstall({ defaults: true });
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toBe('Installed. Config reset to defaults.\n');
+
+    const config = readToml(join(ctx.sandboxIdle, 'config.toml'));
+    expect(config).toMatchObject({
+      thresholds: { time_minutes: 45, tool_calls: 40 },
+      tone: { preset: 'dry' },
+      notifications: { method: 'native', sound: false },
+    });
+  });
+
+  test('without --defaults, preserves an existing valid config with preserved note', async () => {
+    writeCustomConfig();
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toBe(
+      'Installed. Existing config preserved.\n',
+    );
+
+    const config = readToml(join(ctx.sandboxIdle, 'config.toml'));
+    expect(config).toMatchObject({
+      thresholds: { time_minutes: 90, tool_calls: 20 },
+      tone: { preset: 'absurdist' },
+      notifications: { method: 'both', sound: true },
+    });
+  });
+
+  test('reports backup path on fresh install when settings.json pre-exists', async () => {
+    writeFileSync(ctx.settingsPath, JSON.stringify({ keep: true }, null, 2));
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toMatch(
+      /^Installed\. Previous settings backed up to .*\.idle-backup-.*\.\n$/,
+    );
+  });
+
+  test('preserved config + settings backup combines both notes', async () => {
+    writeCustomConfig();
+    writeFileSync(ctx.settingsPath, JSON.stringify({ keep: true }, null, 2));
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toMatch(
+      /^Installed\. Existing config preserved\. Previous settings backed up to .*\.idle-backup-.*\.\n$/,
+    );
+  });
+
+  test('--defaults + settings backup combines reset note and backup note', async () => {
+    writeCustomConfig();
+    writeFileSync(ctx.settingsPath, JSON.stringify({ keep: true }, null, 2));
+
+    const code = await runInstall({ defaults: true });
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toMatch(
+      /^Installed\. Config reset to defaults\. Previous settings backed up to .*\.idle-backup-.*\.\n$/,
+    );
+  });
+
+  test('refuses to run when ~/.claude/ does not exist', async () => {
+    const restore = simulateMissingClaudeHome(ctx);
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('~/.claude/ not found');
+    expect(ctx.captured.stdout).toBe('');
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+
+    restore();
+  });
+
+  test('prints a clean error when the existing config is malformed', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), 'garbage = = broken');
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('Failed to parse TOML config');
+    expect(ctx.captured.stderr).toContain('install --defaults');
+    expect(existsSync(ctx.settingsPath)).toBe(false);
+  });
+
+  test('is idempotent: second install preserves config and leaves one copy of each Idle hook', async () => {
+    await runInstall({});
+    ctx.captured.stdout = '';
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toMatch(
+      /^Installed\. Existing config preserved\. Previous settings backed up to .*\.idle-backup-.*\.\n$/,
+    );
+
+    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
+      hooks: Record<
+        string,
+        Array<{ matcher: string; hooks: Array<{ command: string }> }>
+      >;
+    };
+    for (const event of Object.values(parsed.hooks)) {
+      const idleCmds = event
+        .flatMap((g) => g.hooks)
+        .filter((h) => h.command.includes(IDLE_TAG));
+      expect(idleCmds.length).toBe(1);
+    }
+  });
+});
