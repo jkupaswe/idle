@@ -5,10 +5,7 @@ import type { Command } from 'commander';
 import { uninstallHooks } from '../core/settings.js';
 import { idleHome } from '../lib/paths.js';
 
-import {
-  ensureClaudeHomeAndHookScripts,
-  formatUninstallResult,
-} from './_shared.js';
+import { ensureClaudeHome, formatUninstallResult } from './_shared.js';
 
 interface UninstallCliOptions {
   purge?: boolean;
@@ -32,7 +29,7 @@ export function register(program: Command): void {
 export async function runUninstall(
   options: UninstallCliOptions,
 ): Promise<number> {
-  if (!ensureClaudeHomeAndHookScripts()) return 1;
+  if (!ensureClaudeHome()) return 1;
 
   // Resolve the purge decision upfront so a non-TTY --purge without
   // --yes fails before touching ~/.claude/settings.json. Otherwise the

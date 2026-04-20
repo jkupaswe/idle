@@ -64,6 +64,27 @@ describe('runUninstall', () => {
 
     restore();
   });
+
+  test('removes Idle hooks even when hook scripts are missing on disk (Decision TT)', async () => {
+    // Install succeeds with stubs in place, then we delete the stubs
+    // to simulate a broken node_modules. Uninstall must still be able
+    // to remove the hook entries from settings.json.
+    await runInstall({});
+    ctx.captured.stdout = '';
+    ctx.captured.stderr = '';
+    ctx.removeHookScript('stop.ts');
+    ctx.removeHookScript('session-start.ts');
+
+    const code = await runUninstall({});
+    expect(code).toBe(0);
+    expect(ctx.captured.stdout).toMatch(
+      /^Uninstalled\. Previous settings backed up to .*\.idle-backup-.*\.\n$/,
+    );
+    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
+      hooks?: unknown;
+    };
+    expect(parsed.hooks).toBeUndefined();
+  });
 });
 
 describe('runUninstall --purge', () => {

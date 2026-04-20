@@ -30,13 +30,13 @@ export function ensureClaudeInstalled(): boolean {
 }
 
 /**
- * Narrower guard used by `uninstall` when the PATH binary isn't
- * required (removing hooks doesn't need to actually run `claude`).
+ * Directory-only guard used by `uninstall`. Removing entries from
+ * settings.json does not require hook scripts or `claude` to be
+ * present — otherwise a damaged node_modules could strand users
+ * with Idle hooks in settings.json they can't remove.
  */
-export function ensureClaudeHomeAndHookScripts(): boolean {
-  if (!ensureClaudeHomeExists()) return false;
-  if (!ensureHookScriptsPresent()) return false;
-  return true;
+export function ensureClaudeHome(): boolean {
+  return ensureClaudeHomeExists();
 }
 
 function ensureClaudeHomeExists(): boolean {
