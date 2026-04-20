@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import prompts from 'prompts';
 import { describe, expect, test } from 'vitest';
 
-import { runInit } from '../../src/commands/init.js';
+import { runInit, validateThreshold } from '../../src/commands/init.js';
+import { ConfigValidationError } from '../../src/core/config.js';
 import { IDLE_TAG } from '../../src/core/settings.js';
 
 import { readToml, simulateMissingClaudeHome, useCliSandbox } from './_harness.js';
@@ -130,5 +131,29 @@ describe('runInit', () => {
     expect(code).toBe(1);
     expect(ctx.captured.stderr).toContain('Could not read');
     expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
+  test('Decision VV: injected decimal threshold is rejected downstream', async () => {
+    // prompts.inject() skips prompt-level validation, so this exercises
+    // the saveConfig defense — proves the decimal doesn't survive to
+    // the state layer. Real interactive runs are caught earlier by the
+    // validator (see validateThreshold unit test below).
+    prompts.inject(['dry', 1.5, 40, 'native', true]);
+
+    await expect(runInit()).rejects.toBeInstanceOf(ConfigValidationError);
+  });
+});
+
+describe('validateThreshold (Decision VV)', () => {
+  test('accepts integers', () => {
+    expect(validateThreshold(0)).toBe(true);
+    expect(validateThreshold(45)).toBe(true);
+    expect(validateThreshold(9999)).toBe(true);
+  });
+
+  test('rejects non-integer input with a terse message', () => {
+    expect(validateThreshold(1.5)).toBe('Enter a whole number.');
+    expect(validateThreshold(2.3)).toBe('Enter a whole number.');
+    expect(validateThreshold(Math.PI)).toBe('Enter a whole number.');
   });
 });

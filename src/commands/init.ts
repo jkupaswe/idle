@@ -23,6 +23,18 @@ interface InitAnswers {
   confirm: boolean;
 }
 
+/**
+ * Prompt-layer guard for the time/tool-call threshold fields. Non-integers
+ * (1.5, 2.3) silently pass `min: 0` but fail `saveConfig()` later — catch
+ * them at the prompt so the user gets a targeted reprompt message instead
+ * of a thrown config error. Exported for unit testing; `prompts.inject()`
+ * bypasses validators entirely, so the prompt-level behavior can only be
+ * verified by calling this function directly.
+ */
+export function validateThreshold(value: number): true | string {
+  return Number.isInteger(value) ? true : 'Enter a whole number.';
+}
+
 function toneChoices(): { title: string; value: TonePreset }[] {
   return TONE_PRESETS.map((preset) => ({
     title: preset === 'dry' ? 'dry (default)' : preset,
@@ -64,6 +76,7 @@ export async function runInit(): Promise<number> {
       message: 'Time threshold (minutes)',
       initial: 45,
       min: 0,
+      validate: validateThreshold,
     },
     {
       type: 'number',
@@ -71,6 +84,7 @@ export async function runInit(): Promise<number> {
       message: 'Tool call threshold',
       initial: 40,
       min: 0,
+      validate: validateThreshold,
     },
     {
       type: 'select',

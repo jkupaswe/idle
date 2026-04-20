@@ -10,9 +10,24 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import TOML from '@iarna/toml';
+import prompts from 'prompts';
 import { afterEach, beforeEach, vi } from 'vitest';
 
 import { IDLE_HOOK_EVENTS } from '../../src/core/settings.js';
+
+/**
+ * `prompts.inject()` appends to a module-global queue that is never
+ * cleared between tests. Leftover answers from one test bleed into the
+ * next and silently substitute for real prompt results, causing
+ * order-dependent failures. Drain the queue defensively.
+ */
+interface PromptsWithInject {
+  _injected?: unknown[];
+}
+function drainInjectedAnswers(): void {
+  const p = prompts as unknown as PromptsWithInject;
+  if (Array.isArray(p._injected)) p._injected.length = 0;
+}
 
 export interface CliSandbox {
   /** Fake `~/.claude/` directory. */
@@ -71,6 +86,7 @@ export function useCliSandbox(prefix: string): CliSandbox {
   let originalIsTty: boolean | undefined;
 
   beforeEach(() => {
+    drainInjectedAnswers();
     ctx.sandboxClaude = mkdtempSync(join(tmpdir(), `idle-${prefix}-claude-`));
     ctx.sandboxIdle = mkdtempSync(join(tmpdir(), `idle-${prefix}-home-`));
     ctx.sandboxHooks = mkdtempSync(join(tmpdir(), `idle-${prefix}-hooks-`));
@@ -119,6 +135,7 @@ export function useCliSandbox(prefix: string): CliSandbox {
   });
 
   afterEach(() => {
+    drainInjectedAnswers();
     writeStdoutSpy?.mockRestore();
     writeStderrSpy?.mockRestore();
     delete process.env.IDLE_HOME;
