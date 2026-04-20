@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, test } from 'vitest';
 
+import { IDLE_HOOK_EVENTS } from '../../src/core/settings.js';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..');
 
@@ -140,6 +142,21 @@ describe('package tarball shape (F-001)', () => {
 
   test('ships package.json (always, per npm convention)', () => {
     expect(shipped.has('package.json')).toBe(true);
+  });
+
+  test('installHooks hook-script targets all exist in tarball', () => {
+    // Regression guard for the exact bug class where settings.ts references
+    // a hook script that isn't shipped: the `npx tsx` command fires with a
+    // dead path and Claude Code's Stop/PostToolUse/SessionEnd events fail.
+    // Cross-references the filenames in IDLE_HOOK_EVENTS against the tarball
+    // so the two can't drift.
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const shippedPath = `src/hooks/${hook.script}`;
+      expect(
+        shipped.has(shippedPath),
+        `installHooks references ${shippedPath} but the tarball does not ship it`,
+      ).toBe(true);
+    }
   });
 
   test('does not ship test, build, or config files', () => {
