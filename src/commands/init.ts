@@ -9,7 +9,11 @@ import type {
   TonePreset,
 } from '../lib/types.js';
 
-import { ensureClaudeInstalled, formatInstallResult } from './_shared.js';
+import {
+  ensureClaudeInstalled,
+  formatInstallResult,
+  provisionIdleHome,
+} from './_shared.js';
 
 interface InitAnswers {
   tonePreset: TonePreset;
@@ -111,5 +115,6 @@ export async function runInit(): Promise<number> {
   const result = await installHooks();
   if (!result.ok) return formatInstallResult(result);
   saveConfig(config);
+  provisionIdleHome();
   return formatInstallResult(result);
 }

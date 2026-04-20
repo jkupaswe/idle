@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, test } from 'vitest';
@@ -167,6 +173,62 @@ describe('runInstall', () => {
     expect(ctx.captured.stderr).toContain('Failed to parse TOML config');
     expect(ctx.captured.stderr).toContain('install --defaults');
     expect(existsSync(ctx.settingsPath)).toBe(false);
+  });
+
+  test('fresh install provisions all runtime files (Decision UU, PRD §6.1)', async () => {
+    const code = await runInstall({});
+    expect(code).toBe(0);
+
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(true);
+    expect(existsSync(join(ctx.sandboxIdle, 'state.json'))).toBe(true);
+    expect(existsSync(join(ctx.sandboxIdle, 'sessions'))).toBe(true);
+    expect(existsSync(join(ctx.sandboxIdle, 'debug.log'))).toBe(true);
+
+    const state = JSON.parse(
+      readFileSync(join(ctx.sandboxIdle, 'state.json'), 'utf8'),
+    ) as { sessions: unknown };
+    expect(state.sessions).toEqual({});
+  });
+
+  test('re-install preserves existing state.json content', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    const preserved = JSON.stringify(
+      { sessions: { 'sess_abc': { marker: 'keep me' } } },
+      null,
+      2,
+    );
+    writeFileSync(join(ctx.sandboxIdle, 'state.json'), preserved);
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(readFileSync(join(ctx.sandboxIdle, 'state.json'), 'utf8')).toBe(
+      preserved,
+    );
+  });
+
+  test('re-install does not truncate existing debug.log', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    const history = 'line 1\nline 2\n';
+    writeFileSync(join(ctx.sandboxIdle, 'debug.log'), history);
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(readFileSync(join(ctx.sandboxIdle, 'debug.log'), 'utf8')).toBe(
+      history,
+    );
+  });
+
+  test('re-install re-creates runtime files the user deleted', async () => {
+    await runInstall({});
+    rmSync(join(ctx.sandboxIdle, 'state.json'));
+    rmSync(join(ctx.sandboxIdle, 'debug.log'));
+    rmSync(join(ctx.sandboxIdle, 'sessions'), { recursive: true });
+
+    const code = await runInstall({});
+    expect(code).toBe(0);
+    expect(existsSync(join(ctx.sandboxIdle, 'state.json'))).toBe(true);
+    expect(existsSync(join(ctx.sandboxIdle, 'sessions'))).toBe(true);
+    expect(existsSync(join(ctx.sandboxIdle, 'debug.log'))).toBe(true);
   });
 
   test('is idempotent: second install preserves config and leaves one copy of each Idle hook', async () => {

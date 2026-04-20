@@ -16,6 +16,7 @@ import type { IdleConfig } from '../lib/types.js';
 import {
   ensureClaudeInstalled,
   formatInstallResult,
+  provisionIdleHome,
   writeConfigLoadError,
 } from './_shared.js';
 
@@ -52,6 +53,7 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
   const result = await installHooks();
   if (!result.ok) return formatInstallResult(result);
   if (plan.write !== null) saveConfig(plan.write);
+  provisionIdleHome();
   return formatInstallResult(result, plan.note);
 }
 

@@ -1,4 +1,10 @@
-import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 
 import type { ConfigParseError, ConfigValidationError } from '../core/config.js';
@@ -8,7 +14,7 @@ import {
   type InstallResult,
   type UninstallResult,
 } from '../core/settings.js';
-import { claudeSettingsPath } from '../lib/paths.js';
+import { claudeSettingsPath, idleHome, idleSessionsDir } from '../lib/paths.js';
 
 const CLAUDE_URL = 'https://claude.com/product/claude-code';
 
@@ -179,4 +185,35 @@ export function writeConfigLoadError(
   process.stderr.write(
     'Run `idle install --defaults` to overwrite, or edit the file.\n',
   );
+}
+
+/**
+ * Provision the PRD §6.1 runtime layout under `~/.idle/`:
+ * - `~/.idle/` directory.
+ * - `~/.idle/sessions/` directory.
+ * - `~/.idle/state.json` if missing (empty-state shape, not `{}`, so
+ *   `readState()` doesn't treat it as a schema mismatch and back it up).
+ * - `~/.idle/debug.log` touched via append-mode so existing content
+ *   survives a re-install.
+ *
+ * Runs after `installHooks()` and `saveConfig()` have succeeded —
+ * a failed install must not leave half-provisioned state.
+ */
+export function provisionIdleHome(): void {
+  const home = idleHome();
+  mkdirSync(home, { recursive: true });
+  mkdirSync(idleSessionsDir(), { recursive: true });
+
+  const statePath = join(home, 'state.json');
+  try {
+    writeFileSync(
+      statePath,
+      `${JSON.stringify({ sessions: {} }, null, 2)}\n`,
+      { flag: 'wx' },
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+
+  writeFileSync(join(home, 'debug.log'), '', { flag: 'a' });
 }
