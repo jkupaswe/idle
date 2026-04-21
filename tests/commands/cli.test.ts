@@ -137,14 +137,13 @@ describe('unknown command', () => {
 
 describe('stubbed subcommands', () => {
   // init/install/uninstall were implemented in T-014 and no longer emit
-  // the "not yet implemented" stub. The remaining commands are still
-  // stubbed pending T-015 and T-016.
+  // the "not yet implemented" stub. doctor was implemented in T-016.
+  // The remaining commands are still stubbed pending T-015.
   const subcommands = [
     'stats',
     'status',
     'enable',
     'disable',
-    'doctor',
   ] as const;
 
   for (const name of subcommands) {
