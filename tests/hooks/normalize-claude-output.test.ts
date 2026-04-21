@@ -66,4 +66,46 @@ describe('normalizeClaudeOutput', () => {
   test('leading blank lines are skipped', () => {
     expect(normalizeClaudeOutput('\n\n\n  Hello.')).toBe('Hello.');
   });
+
+  // ---- codex-review-2 finding 2: broader escape stripping ----
+
+  test('OSC hyperlink (ESC ] 8 ; ; URL BEL ... BEL) is stripped', () => {
+    const raw =
+      '\x1b]8;;https://example.com\x07CLICK\x1b]8;;\x07';
+    expect(normalizeClaudeOutput(raw)).toBe('CLICK');
+  });
+
+  test('OSC title-setter (ESC ] 0 ; title BEL) is stripped', () => {
+    const raw = '\x1b]0;window title\x07hello';
+    expect(normalizeClaudeOutput(raw)).toBe('hello');
+  });
+
+  test('OSC terminated with ESC backslash (string terminator) is stripped', () => {
+    const raw = '\x1b]2;title\x1b\\after';
+    expect(normalizeClaudeOutput(raw)).toBe('after');
+  });
+
+  test('bare BEL byte is stripped', () => {
+    expect(normalizeClaudeOutput('hello\x07world')).toBe('helloworld');
+  });
+
+  test('CSI private-mode sequence with ? is stripped', () => {
+    expect(normalizeClaudeOutput('\x1b[?25lhidden cursor\x1b[?25h')).toBe(
+      'hidden cursor',
+    );
+  });
+
+  test('Fe single-char escape (ESC M reverse line feed) is stripped', () => {
+    expect(normalizeClaudeOutput('\x1bMreverse')).toBe('reverse');
+  });
+
+  test('plain text is unchanged (regression guard)', () => {
+    expect(normalizeClaudeOutput('Go stretch.')).toBe('Go stretch.');
+  });
+
+  test('CSI + OSC + bare control chars combined', () => {
+    const raw =
+      '\x1b[31m\x1b]8;;https://x\x07click\x1b]8;;\x07\x1b[0m\x07Go.';
+    expect(normalizeClaudeOutput(raw)).toBe('clickGo.');
+  });
 });
