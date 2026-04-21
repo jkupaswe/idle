@@ -111,9 +111,12 @@ export function useCliSandbox(prefix: string): CliSandbox {
     process.env.IDLE_HOME = ctx.sandboxIdle;
     process.env.IDLE_CLAUDE_SETTINGS_PATH = ctx.settingsPath;
     process.env.IDLE_HOOKS_DIR = ctx.sandboxHooks;
-    process.env.PATH = `${ctx.sandboxBin}${
-      originalPath ? `:${originalPath}` : ''
-    }`;
+    // PATH deliberately excludes the tester's real $PATH — otherwise
+    // tests that try to hide `claude` via sandbox manipulation still
+    // find the machine's real Claude binary and read as green.
+    // Node's own bin dir is kept so execFile / spawned tests can resolve
+    // `node`.
+    process.env.PATH = `${ctx.sandboxBin}:${dirname(process.execPath)}`;
 
     originalIsTty = process.stdin.isTTY;
     ctx.setStdinTty(true);

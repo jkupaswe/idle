@@ -142,6 +142,33 @@ describe('runInstall', () => {
     expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
   });
 
+  test('refuses to run when an internal hook script is a directory, not a file', async () => {
+    // Reproduce Codex round 3 finding 4: ensureHookScriptsPresent
+    // previously used existsSync and would accept a directory named
+    // stop.ts. Now requires statSync().isFile().
+    ctx.removeHookScript('stop.ts');
+    mkdirSync(join(ctx.sandboxHooks, 'stop.ts'));
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toMatch(
+      /idle is missing an internal hook script: .*stop\.ts/,
+    );
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
+  test('refuses to run when `claude` on PATH is a directory, not an executable', async () => {
+    // Reproduce Codex round 3 finding 4: claudeOnPath previously used
+    // accessSync(X_OK) which accepts searchable directories. Now
+    // requires statSync().isFile().
+    rmSync(join(ctx.sandboxBin, 'claude'));
+    mkdirSync(join(ctx.sandboxBin, 'claude'));
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('claude not found on PATH');
+  });
+
   test('refuses to run when an internal hook script is missing', async () => {
     ctx.removeHookScript('stop.ts');
 

@@ -3,6 +3,7 @@ import {
   constants as fsConstants,
   existsSync,
   mkdirSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
@@ -66,7 +67,7 @@ function ensureHookScriptsPresent(): boolean {
   const dir = defaultHooksDir();
   for (const hook of IDLE_HOOK_EVENTS) {
     const abs = join(dir, hook.script);
-    if (existsSync(abs)) continue;
+    if (isRegularFile(abs)) continue;
     process.stderr.write(
       `idle is missing an internal hook script: ${abs}. Re-install the package.\n`,
     );
@@ -77,8 +78,10 @@ function ensureHookScriptsPresent(): boolean {
 
 /**
  * Cross-platform `which claude`. Walks `process.env.PATH` and checks
- * each entry for an executable. Returns true on the first hit. Honors
- * `PATHEXT` on Windows so `claude.cmd` / `claude.exe` resolve.
+ * each entry for an *executable regular file* — `accessSync` alone
+ * accepts directories with the execute bit set (common for the +x on
+ * `~/bin/claude/`), so we require `isFile()` too. Honors `PATHEXT` on
+ * Windows so `claude.cmd` / `claude.exe` resolve.
  */
 function claudeOnPath(): boolean {
   const rawPath = process.env.PATH ?? '';
@@ -87,8 +90,10 @@ function claudeOnPath(): boolean {
   for (const dir of rawPath.split(delimiter)) {
     if (dir.length === 0) continue;
     for (const name of candidateNames) {
+      const candidate = join(dir, name);
       try {
-        accessSync(join(dir, name), fsConstants.X_OK);
+        if (!statSync(candidate).isFile()) continue;
+        accessSync(candidate, fsConstants.X_OK);
         return true;
       } catch {
         // keep walking
@@ -96,6 +101,14 @@ function claudeOnPath(): boolean {
     }
   }
   return false;
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function executableNames(base: string): string[] {
