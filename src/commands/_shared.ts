@@ -246,13 +246,37 @@ export function restoreConfigSnapshot(snapshot: Buffer | null): void {
 
 /**
  * Undo a just-completed `installHooks()` after a post-hook step
- * (saveConfig, provisionIdleHome) fails. Preserves the transactional
- * guarantee that install either lands a working state or leaves
- * settings.json as it was. If rollback itself fails, point the user at
- * `idle uninstall` so they can recover manually.
+ * (saveConfig, provisionIdleHome) fails. Restores settings.json from
+ * the backup `installHooks()` produced — or unlinks the file when the
+ * install created it fresh — so pre-existing non-Idle hooks survive a
+ * failed reinstall.
+ *
+ * If the preferred path fails, falls back to `uninstallHooks()`. If
+ * that fails too, the user gets a terse "Rollback failed. Run
+ * `idle uninstall`" line and exit 1.
  */
-export async function rollbackInstalledHooks(): Promise<void> {
-  const result = await uninstallHooks();
+export async function rollbackInstalledHooks(opts: {
+  settingsPath: string;
+  backupPath: string | null;
+}): Promise<void> {
+  if (opts.backupPath !== null) {
+    try {
+      writeFileSync(opts.settingsPath, readFileSync(opts.backupPath));
+      return;
+    } catch {
+      // fall through to best-effort uninstall
+    }
+  } else {
+    try {
+      unlinkSync(opts.settingsPath);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      // fall through
+    }
+  }
+
+  const result = await uninstallHooks({ settingsPath: opts.settingsPath });
   if (!result.ok) {
     process.stderr.write(
       `Rollback failed: ${result.detail}. Run \`idle uninstall\` to clean up.\n`,

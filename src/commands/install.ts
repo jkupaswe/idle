@@ -68,7 +68,10 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
     provisionIdleHome();
   } catch (err) {
     writePostHookFailure(err);
-    await rollbackInstalledHooks();
+    await rollbackInstalledHooks({
+      settingsPath: result.settingsPath,
+      backupPath: result.backupPath,
+    });
     restoreConfigSnapshot(preInstallConfig);
     return 1;
   }

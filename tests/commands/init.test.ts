@@ -144,10 +144,8 @@ describe('runInit', () => {
     expect(ctx.captured.stderr).toMatch(
       /install failed after hooks were registered.*thresholds\.time_minutes/,
     );
-    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
-      hooks?: unknown;
-    };
-    expect(parsed.hooks).toBeUndefined();
+    // No pre-existing settings.json → rollback unlinks what install wrote.
+    expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 });
 

@@ -231,6 +231,44 @@ describe('runInstall', () => {
     );
   });
 
+  test('rollback restores pre-install settings.json byte-for-byte (CHANGE 2)', async () => {
+    // Pre-existing user settings.json with non-Idle hooks the user
+    // cares about. Rollback must leave it untouched.
+    const userSettings = JSON.stringify(
+      {
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: 'echo user-hook-survives' }],
+            },
+          ],
+        },
+        model: 'sonnet',
+      },
+      null,
+      2,
+    );
+    writeFileSync(ctx.settingsPath, userSettings);
+
+    // Provoke a post-hook failure.
+    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(readFileSync(ctx.settingsPath, 'utf8')).toBe(userSettings);
+  });
+
+  test('rollback unlinks settings.json that install created fresh (CHANGE 2)', async () => {
+    // No pre-existing settings.json. installHooks will create one;
+    // rollback must remove it so the user's pre-install state is restored.
+    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(existsSync(ctx.settingsPath)).toBe(false);
+  });
+
   test('rollback unlinks config.toml that install created (no pre-existing)', async () => {
     // No pre-existing config. Provoke a post-hook failure so
     // install writes defaults then must roll back.
@@ -250,10 +288,8 @@ describe('runInstall', () => {
     expect(ctx.captured.stderr).toMatch(
       /install failed after hooks were registered.*state\.json exists but is not a regular file/,
     );
-    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
-      hooks?: unknown;
-    };
-    expect(parsed.hooks).toBeUndefined();
+    // No pre-existing settings.json → rollback unlinks what install wrote.
+    expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
   test('rolls back when debug.log exists as a directory', async () => {
@@ -264,10 +300,7 @@ describe('runInstall', () => {
     expect(ctx.captured.stderr).toContain(
       'debug.log exists but is not a regular file',
     );
-    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
-      hooks?: unknown;
-    };
-    expect(parsed.hooks).toBeUndefined();
+    expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
   test('rolls back when sessions/ exists as a file', async () => {
@@ -279,10 +312,7 @@ describe('runInstall', () => {
     expect(ctx.captured.stderr).toContain(
       'sessions exists but is not a directory',
     );
-    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
-      hooks?: unknown;
-    };
-    expect(parsed.hooks).toBeUndefined();
+    expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
   test('fresh install provisions all runtime files (Decision UU, PRD §6.1)', async () => {
