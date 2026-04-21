@@ -86,7 +86,7 @@ function ensureClaudeHomeExists(): void {
 }
 
 function ensureClaudeOnPath(): void {
-  if (claudeOnPath()) return;
+  if (resolveClaudeOnPath() !== null) return;
   throw new Error(
     `claude not found on PATH. Install Claude Code first: ${CLAUDE_URL}`,
   );
@@ -163,15 +163,16 @@ function ensureSessionsDirIsValidOrMissing(): void {
 }
 
 /**
- * Cross-platform `which claude`. Walks `process.env.PATH` and checks
- * each entry for an *executable regular file* — `accessSync` alone
- * accepts directories with the execute bit set (common for the +x on
- * `~/bin/claude/`), so we require `isFile()` too. Honors `PATHEXT` on
- * Windows so `claude.cmd` / `claude.exe` resolve.
+ * Cross-platform `which claude`. Walks `process.env.PATH` and returns
+ * the resolved absolute path of the first executable regular file
+ * named `claude` (accounting for Windows `PATHEXT`). Returns `null`
+ * when nothing matches. `accessSync` alone accepts directories with
+ * the execute bit set (common for `~/bin/claude/`), so we require
+ * `isFile()` too.
  */
-function claudeOnPath(): boolean {
+export function resolveClaudeOnPath(): string | null {
   const rawPath = process.env.PATH ?? '';
-  if (rawPath.length === 0) return false;
+  if (rawPath.length === 0) return null;
   const candidateNames = executableNames('claude');
   for (const dir of rawPath.split(delimiter)) {
     if (dir.length === 0) continue;
@@ -180,13 +181,13 @@ function claudeOnPath(): boolean {
       try {
         if (!statSync(candidate).isFile()) continue;
         accessSync(candidate, fsConstants.X_OK);
-        return true;
+        return candidate;
       } catch {
         // keep walking
       }
     }
   }
-  return false;
+  return null;
 }
 
 function isRegularFile(path: string): boolean {
