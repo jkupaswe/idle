@@ -13,6 +13,8 @@ import {
   ensureClaudeInstalled,
   formatInstallResult,
   provisionIdleHome,
+  rollbackInstalledHooks,
+  writePostHookFailure,
 } from './_shared.js';
 
 interface InitAnswers {
@@ -128,7 +130,15 @@ export async function runInit(): Promise<number> {
   // stray config.toml behind (PRD §6.1 "restore exact prior state").
   const result = await installHooks();
   if (!result.ok) return formatInstallResult(result);
-  saveConfig(config);
-  provisionIdleHome();
+
+  try {
+    saveConfig(config);
+    provisionIdleHome();
+  } catch (err) {
+    writePostHookFailure(err);
+    await rollbackInstalledHooks();
+    return 1;
+  }
+
   return formatInstallResult(result);
 }

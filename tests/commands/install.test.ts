@@ -202,26 +202,47 @@ describe('runInstall', () => {
     expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
-  test('refuses to proceed when state.json exists as a directory', async () => {
+  test('rolls back when state.json exists as a directory', async () => {
     mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
-    await expect(runInstall({})).rejects.toThrow(
-      /state\.json exists but is not a regular file/,
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toMatch(
+      /install failed after hooks were registered.*state\.json exists but is not a regular file/,
     );
+    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
+      hooks?: unknown;
+    };
+    expect(parsed.hooks).toBeUndefined();
   });
 
-  test('refuses to proceed when debug.log exists as a directory', async () => {
+  test('rolls back when debug.log exists as a directory', async () => {
     mkdirSync(join(ctx.sandboxIdle, 'debug.log'), { recursive: true });
-    await expect(runInstall({})).rejects.toThrow(
-      /debug\.log exists but is not a regular file/,
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain(
+      'debug.log exists but is not a regular file',
     );
+    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
+      hooks?: unknown;
+    };
+    expect(parsed.hooks).toBeUndefined();
   });
 
-  test('refuses to proceed when sessions/ exists as a file', async () => {
+  test('rolls back when sessions/ exists as a file', async () => {
     mkdirSync(ctx.sandboxIdle, { recursive: true });
     writeFileSync(join(ctx.sandboxIdle, 'sessions'), 'not a dir');
-    await expect(runInstall({})).rejects.toThrow(
-      /sessions exists but is not a directory/,
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain(
+      'sessions exists but is not a directory',
     );
+    const parsed = JSON.parse(readFileSync(ctx.settingsPath, 'utf8')) as {
+      hooks?: unknown;
+    };
+    expect(parsed.hooks).toBeUndefined();
   });
 
   test('fresh install provisions all runtime files (Decision UU, PRD §6.1)', async () => {

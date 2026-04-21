@@ -17,7 +17,9 @@ import {
   ensureClaudeInstalled,
   formatInstallResult,
   provisionIdleHome,
+  rollbackInstalledHooks,
   writeConfigLoadError,
+  writePostHookFailure,
 } from './_shared.js';
 
 interface InstallCliOptions {
@@ -52,8 +54,16 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
   // stray or reset config.toml on disk.
   const result = await installHooks();
   if (!result.ok) return formatInstallResult(result);
-  if (plan.write !== null) saveConfig(plan.write);
-  provisionIdleHome();
+
+  try {
+    if (plan.write !== null) saveConfig(plan.write);
+    provisionIdleHome();
+  } catch (err) {
+    writePostHookFailure(err);
+    await rollbackInstalledHooks();
+    return 1;
+  }
+
   return formatInstallResult(result, plan.note);
 }
 

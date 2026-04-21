@@ -12,6 +12,7 @@ import type { ConfigParseError, ConfigValidationError } from '../core/config.js'
 import {
   IDLE_HOOK_EVENTS,
   defaultHooksDir,
+  uninstallHooks,
   type InstallResult,
   type UninstallResult,
 } from '../core/settings.js';
@@ -198,6 +199,27 @@ export function writeConfigLoadError(
   process.stderr.write(
     'Run `idle install --defaults` to overwrite, or edit the file.\n',
   );
+}
+
+/**
+ * Undo a just-completed `installHooks()` after a post-hook step
+ * (saveConfig, provisionIdleHome) fails. Preserves the transactional
+ * guarantee that install either lands a working state or leaves
+ * settings.json as it was. If rollback itself fails, point the user at
+ * `idle uninstall` so they can recover manually.
+ */
+export async function rollbackInstalledHooks(): Promise<void> {
+  const result = await uninstallHooks();
+  if (!result.ok) {
+    process.stderr.write(
+      `Rollback failed: ${result.detail}. Run \`idle uninstall\` to clean up.\n`,
+    );
+  }
+}
+
+export function writePostHookFailure(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`install failed after hooks were registered: ${msg}\n`);
 }
 
 /**
