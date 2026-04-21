@@ -3,9 +3,12 @@ import {
   constants as fsConstants,
   existsSync,
   mkdirSync,
+  readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import type { Buffer } from 'node:buffer';
 import { delimiter, dirname, join } from 'node:path';
 
 import type { ConfigParseError, ConfigValidationError } from '../core/config.js';
@@ -16,7 +19,12 @@ import {
   type InstallResult,
   type UninstallResult,
 } from '../core/settings.js';
-import { claudeSettingsPath, idleHome, idleSessionsDir } from '../lib/paths.js';
+import {
+  claudeSettingsPath,
+  idleConfigPath,
+  idleHome,
+  idleSessionsDir,
+} from '../lib/paths.js';
 
 const CLAUDE_URL = 'https://claude.com/product/claude-code';
 
@@ -199,6 +207,41 @@ export function writeConfigLoadError(
   process.stderr.write(
     'Run `idle install --defaults` to overwrite, or edit the file.\n',
   );
+}
+
+/**
+ * Read `~/.idle/config.toml` into a buffer. Returns `null` when the
+ * file does not exist. Any other I/O failure propagates. Callers
+ * take the snapshot before calling `saveConfig()` so they can restore
+ * a user's customizations if a later install step fails.
+ */
+export function snapshotConfig(): Buffer | null {
+  try {
+    return readFileSync(idleConfigPath());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Undo a `saveConfig()` that ran as part of a failed install:
+ * - If a snapshot was captured, restore it byte-for-byte.
+ * - If no snapshot (config didn't exist pre-install), unlink the
+ *   config we wrote.
+ * Unlink is best-effort — ENOENT is fine; other errors propagate.
+ */
+export function restoreConfigSnapshot(snapshot: Buffer | null): void {
+  const path = idleConfigPath();
+  if (snapshot !== null) {
+    writeFileSync(path, snapshot);
+    return;
+  }
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
 }
 
 /**

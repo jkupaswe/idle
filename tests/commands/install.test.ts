@@ -202,6 +202,46 @@ describe('runInstall', () => {
     expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
+  test('rollback restores pre-install config.toml byte-for-byte (CHANGE 1)', async () => {
+    // Customized config on disk that the user cares about.
+    const custom = [
+      '[thresholds]',
+      'time_minutes = 90',
+      'tool_calls = 20',
+      '',
+      '[tone]',
+      'preset = "absurdist"',
+      '',
+      '[notifications]',
+      'method = "both"',
+      'sound = true',
+      '',
+    ].join('\n');
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), custom);
+
+    // Provoke a post-hook failure via state.json as a directory.
+    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
+
+    // --defaults would clobber the custom config; rollback must restore it.
+    const code = await runInstall({ defaults: true });
+    expect(code).toBe(1);
+    expect(readFileSync(join(ctx.sandboxIdle, 'config.toml'), 'utf8')).toBe(
+      custom,
+    );
+  });
+
+  test('rollback unlinks config.toml that install created (no pre-existing)', async () => {
+    // No pre-existing config. Provoke a post-hook failure so
+    // install writes defaults then must roll back.
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
+  });
+
   test('rolls back when state.json exists as a directory', async () => {
     mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
 

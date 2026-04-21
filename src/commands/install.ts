@@ -17,7 +17,9 @@ import {
   ensureClaudeInstalled,
   formatInstallResult,
   provisionIdleHome,
+  restoreConfigSnapshot,
   rollbackInstalledHooks,
+  snapshotConfig,
   writeConfigLoadError,
   writePostHookFailure,
 } from './_shared.js';
@@ -50,6 +52,12 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
   const plan = resolveConfigPlan(options);
   if (plan === 'config_error') return 1;
 
+  // Snapshot pre-install config bytes before anything mutates disk.
+  // If a later step fails we restore byte-for-byte (or unlink if the
+  // file didn't exist pre-install) — otherwise a failed install would
+  // clobber the user's customizations.
+  const preInstallConfig = snapshotConfig();
+
   // Hooks first, config second — a failed install must not leave a
   // stray or reset config.toml on disk.
   const result = await installHooks();
@@ -61,6 +69,7 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
   } catch (err) {
     writePostHookFailure(err);
     await rollbackInstalledHooks();
+    restoreConfigSnapshot(preInstallConfig);
     return 1;
   }
 
