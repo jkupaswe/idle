@@ -674,3 +674,14 @@ JSDoc comment noting it's an absolute path. Brand it as `AbsolutePath`
 so callers cannot pass a relative path. Small refactor, catches a whole 
 class of potential bugs at compile time. Appropriate for end-of-Wave-2 
 polish.
+
+### F-010 — Full three-way transactional install
+**Status:** Open, v1.1 scope
+**Origin:** Surfaced during T-014 implementation review.
+**Description:** Install currently has partial transaction handling
+(hooks rollback + config snapshot/restore per CHANGES 1 and 2 from
+the final T-014 consolidation). Runtime files (`state.json`,
+`sessions/`, `debug.log`) are not part of the transaction boundary.
+A full transaction model would snapshot all three filesystem surfaces
+pre-install and restore all three on any failure. Approximately
+80-120 lines of CLI + test changes.
