@@ -14,12 +14,12 @@ import { idleConfigPath } from '../lib/paths.js';
 import type { IdleConfig } from '../lib/types.js';
 
 import {
-  ensureClaudeInstalled,
   formatInstallResult,
   provisionIdleHome,
   restoreConfigSnapshot,
   rollbackInstalledHooks,
   snapshotConfig,
+  validateInstallPreconditions,
   writeConfigLoadError,
   writePostHookFailure,
 } from './_shared.js';
@@ -47,7 +47,12 @@ interface PlannedConfig {
 }
 
 export async function runInstall(options: InstallCliOptions): Promise<number> {
-  if (!ensureClaudeInstalled()) return 1;
+  try {
+    validateInstallPreconditions();
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 1;
+  }
 
   const plan = resolveConfigPlan(options);
   if (plan === 'config_error') return 1;

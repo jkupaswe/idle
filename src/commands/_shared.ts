@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import type { Buffer } from 'node:buffer';
 import { delimiter, dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 
 import type { ConfigParseError, ConfigValidationError } from '../core/config.js';
 import {
@@ -29,20 +30,19 @@ import {
 const CLAUDE_URL = 'https://claude.com/product/claude-code';
 
 /**
- * Full preflight for init / install / uninstall. Per PRD §6.1:
- * - `~/.claude/` must exist.
- * - `claude` must be on PATH.
- * - Idle's own hook scripts must be present (otherwise a "successful"
- *   install writes dead hook commands that fire and fail).
- *
- * Returns true when all three pass. Otherwise prints a terse stderr
- * line identifying the specific gap and returns false.
+ * Full install preflight. Runs every check that can fail without a
+ * pre-existing mutation before `installHooks()` or any file write.
+ * Throws with a terse user-facing message on the first failure;
+ * callers catch, print the message to stderr, and exit 1.
  */
-export function ensureClaudeInstalled(): boolean {
-  if (!ensureClaudeHomeExists()) return false;
-  if (!ensureClaudeOnPath()) return false;
-  if (!ensureHookScriptsPresent()) return false;
-  return true;
+export function validateInstallPreconditions(): void {
+  ensureClaudeHomeExists();
+  ensureHookScriptsPresent();
+  ensureClaudeOnPath();
+  ensureIdleHomeWritable();
+  ensureStateJsonIsValidOrMissing();
+  ensureDebugLogIsValidOrMissing();
+  ensureSessionsDirIsValidOrMissing();
 }
 
 /**
@@ -52,10 +52,6 @@ export function ensureClaudeInstalled(): boolean {
  * with Idle hooks in settings.json they can't remove.
  */
 export function ensureClaudeHome(): boolean {
-  return ensureClaudeHomeExists();
-}
-
-function ensureClaudeHomeExists(): boolean {
   const dir = dirname(claudeSettingsPath());
   if (existsSync(dir)) return true;
   process.stderr.write(
@@ -64,25 +60,89 @@ function ensureClaudeHomeExists(): boolean {
   return false;
 }
 
-function ensureClaudeOnPath(): boolean {
-  if (claudeOnPath()) return true;
-  process.stderr.write(
-    `claude not found on PATH. Install Claude Code first: ${CLAUDE_URL}\n`,
+function ensureClaudeHomeExists(): void {
+  const dir = dirname(claudeSettingsPath());
+  if (existsSync(dir)) return;
+  throw new Error(
+    `~/.claude/ not found. Install Claude Code first: ${CLAUDE_URL}`,
   );
-  return false;
 }
 
-function ensureHookScriptsPresent(): boolean {
+function ensureClaudeOnPath(): void {
+  if (claudeOnPath()) return;
+  throw new Error(
+    `claude not found on PATH. Install Claude Code first: ${CLAUDE_URL}`,
+  );
+}
+
+function ensureHookScriptsPresent(): void {
   const dir = defaultHooksDir();
   for (const hook of IDLE_HOOK_EVENTS) {
     const abs = join(dir, hook.script);
     if (isRegularFile(abs)) continue;
-    process.stderr.write(
-      `idle is missing an internal hook script: ${abs}. Re-install the package.\n`,
+    throw new Error(
+      `idle is missing an internal hook script: ${abs}. Re-install the package.`,
     );
-    return false;
   }
-  return true;
+}
+
+/**
+ * Ensure `~/.idle/` exists, is a directory, and is writable. Creates
+ * the directory if missing; a writability probe (touch + unlink) fails
+ * early on read-only filesystems or restrictive permissions before any
+ * settings.json mutation.
+ */
+function ensureIdleHomeWritable(): void {
+  const home = idleHome();
+  try {
+    if (!existsSync(home)) {
+      mkdirSync(home, { recursive: true });
+    }
+    const stat = statSync(home);
+    if (!stat.isDirectory()) {
+      throw new Error(`idle: ~/.idle exists but is not a directory`);
+    }
+    const probe = join(home, `.idle-write-test-${randomBytes(4).toString('hex')}`);
+    writeFileSync(probe, '');
+    unlinkSync(probe);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('idle: ~/.idle exists')) {
+      throw err;
+    }
+    throw new Error(
+      `idle: ~/.idle is not writable: ${(err as Error).message}`,
+    );
+  }
+}
+
+function ensureStateJsonIsValidOrMissing(): void {
+  const statePath = join(idleHome(), 'state.json');
+  if (!existsSync(statePath)) return;
+  if (!statSync(statePath).isFile()) {
+    throw new Error(
+      `idle: ~/.idle/state.json exists but is not a regular file`,
+    );
+  }
+}
+
+function ensureDebugLogIsValidOrMissing(): void {
+  const logPath = join(idleHome(), 'debug.log');
+  if (!existsSync(logPath)) return;
+  if (!statSync(logPath).isFile()) {
+    throw new Error(
+      `idle: ~/.idle/debug.log exists but is not a regular file`,
+    );
+  }
+}
+
+function ensureSessionsDirIsValidOrMissing(): void {
+  const sessionsPath = idleSessionsDir();
+  if (!existsSync(sessionsPath)) return;
+  if (!statSync(sessionsPath).isDirectory()) {
+    throw new Error(
+      `idle: ~/.idle/sessions exists but is not a directory`,
+    );
+  }
 }
 
 /**
@@ -298,22 +358,19 @@ export function writePostHookFailure(err: unknown): void {
  * - `~/.idle/debug.log` touched via append-mode so existing content
  *   survives a re-install.
  *
- * Runs after `installHooks()` and `saveConfig()` have succeeded —
- * a failed install must not leave half-provisioned state.
+ * Runs after `installHooks()` and `saveConfig()` have succeeded.
+ * File-type invariants (regular file vs. directory) are enforced by
+ * `validateInstallPreconditions()` before hooks land, so this function
+ * only writes.
  */
 export function provisionIdleHome(): void {
   const home = idleHome();
   mkdirSync(home, { recursive: true });
+  mkdirSync(idleSessionsDir(), { recursive: true });
 
-  const sessionsPath = idleSessionsDir();
-  assertIsDirectoryOrMissing(sessionsPath, '~/.idle/sessions');
-  mkdirSync(sessionsPath, { recursive: true });
-
-  const statePath = join(home, 'state.json');
-  assertIsFileOrMissing(statePath, '~/.idle/state.json');
   try {
     writeFileSync(
-      statePath,
+      join(home, 'state.json'),
       `${JSON.stringify({ sessions: {} }, null, 2)}\n`,
       { flag: 'wx' },
     );
@@ -321,37 +378,5 @@ export function provisionIdleHome(): void {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
 
-  const logPath = join(home, 'debug.log');
-  assertIsFileOrMissing(logPath, '~/.idle/debug.log');
-  writeFileSync(logPath, '', { flag: 'a' });
-}
-
-function assertIsFileOrMissing(path: string, label: string): void {
-  let stat;
-  try {
-    stat = statSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
-  }
-  if (!stat.isFile()) {
-    throw new Error(
-      `${label} exists but is not a regular file: ${path}. Remove it and re-run.`,
-    );
-  }
-}
-
-function assertIsDirectoryOrMissing(path: string, label: string): void {
-  let stat;
-  try {
-    stat = statSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw err;
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(
-      `${label} exists but is not a directory: ${path}. Remove it and re-run.`,
-    );
-  }
+  writeFileSync(join(home, 'debug.log'), '', { flag: 'a' });
 }

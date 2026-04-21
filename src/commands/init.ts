@@ -10,12 +10,12 @@ import type {
 } from '../lib/types.js';
 
 import {
-  ensureClaudeInstalled,
   formatInstallResult,
   provisionIdleHome,
   restoreConfigSnapshot,
   rollbackInstalledHooks,
   snapshotConfig,
+  validateInstallPreconditions,
   writePostHookFailure,
 } from './_shared.js';
 
@@ -61,7 +61,12 @@ export function register(program: Command): void {
 }
 
 export async function runInit(): Promise<number> {
-  if (!ensureClaudeInstalled()) return 1;
+  try {
+    validateInstallPreconditions();
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
+    return 1;
+  }
 
   // Lazy-load: keeps `idle --version` out of the prompts bundle.
   const { default: prompts } = await import('prompts');

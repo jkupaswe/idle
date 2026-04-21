@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -202,117 +203,72 @@ describe('runInstall', () => {
     expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
-  test('rollback restores pre-install config.toml byte-for-byte (CHANGE 1)', async () => {
-    // Customized config on disk that the user cares about.
-    const custom = [
-      '[thresholds]',
-      'time_minutes = 90',
-      'tool_calls = 20',
-      '',
-      '[tone]',
-      'preset = "absurdist"',
-      '',
-      '[notifications]',
-      'method = "both"',
-      'sound = true',
-      '',
-    ].join('\n');
-    mkdirSync(ctx.sandboxIdle, { recursive: true });
-    writeFileSync(join(ctx.sandboxIdle, 'config.toml'), custom);
-
-    // Provoke a post-hook failure via state.json as a directory.
-    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
-
-    // --defaults would clobber the custom config; rollback must restore it.
-    const code = await runInstall({ defaults: true });
-    expect(code).toBe(1);
-    expect(readFileSync(join(ctx.sandboxIdle, 'config.toml'), 'utf8')).toBe(
-      custom,
-    );
-  });
-
-  test('rollback restores pre-install settings.json byte-for-byte (CHANGE 2)', async () => {
-    // Pre-existing user settings.json with non-Idle hooks the user
-    // cares about. Rollback must leave it untouched.
-    const userSettings = JSON.stringify(
-      {
-        hooks: {
-          PostToolUse: [
-            {
-              matcher: '',
-              hooks: [{ type: 'command', command: 'echo user-hook-survives' }],
-            },
-          ],
-        },
-        model: 'sonnet',
-      },
-      null,
-      2,
-    );
-    writeFileSync(ctx.settingsPath, userSettings);
-
-    // Provoke a post-hook failure.
+  test('preflight: refuses when state.json is a directory (no writes occur)', async () => {
     mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
 
     const code = await runInstall({});
     expect(code).toBe(1);
-    expect(readFileSync(ctx.settingsPath, 'utf8')).toBe(userSettings);
-  });
-
-  test('rollback unlinks settings.json that install created fresh (CHANGE 2)', async () => {
-    // No pre-existing settings.json. installHooks will create one;
-    // rollback must remove it so the user's pre-install state is restored.
-    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
-
-    const code = await runInstall({});
-    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain(
+      '~/.idle/state.json exists but is not a regular file',
+    );
+    // Install refuses pre-hooks — settings.json is never touched.
     expect(existsSync(ctx.settingsPath)).toBe(false);
-  });
-
-  test('rollback unlinks config.toml that install created (no pre-existing)', async () => {
-    // No pre-existing config. Provoke a post-hook failure so
-    // install writes defaults then must roll back.
-    mkdirSync(ctx.sandboxIdle, { recursive: true });
-    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
-
-    const code = await runInstall({});
-    expect(code).toBe(1);
     expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
   });
 
-  test('rolls back when state.json exists as a directory', async () => {
-    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
-
-    const code = await runInstall({});
-    expect(code).toBe(1);
-    expect(ctx.captured.stderr).toMatch(
-      /install failed after hooks were registered.*state\.json exists but is not a regular file/,
-    );
-    // No pre-existing settings.json → rollback unlinks what install wrote.
-    expect(existsSync(ctx.settingsPath)).toBe(false);
-  });
-
-  test('rolls back when debug.log exists as a directory', async () => {
+  test('preflight: refuses when debug.log is a directory (no writes occur)', async () => {
     mkdirSync(join(ctx.sandboxIdle, 'debug.log'), { recursive: true });
 
     const code = await runInstall({});
     expect(code).toBe(1);
     expect(ctx.captured.stderr).toContain(
-      'debug.log exists but is not a regular file',
+      '~/.idle/debug.log exists but is not a regular file',
     );
     expect(existsSync(ctx.settingsPath)).toBe(false);
+    expect(existsSync(join(ctx.sandboxIdle, 'config.toml'))).toBe(false);
   });
 
-  test('rolls back when sessions/ exists as a file', async () => {
+  test('preflight: refuses when sessions/ is a regular file (no writes occur)', async () => {
     mkdirSync(ctx.sandboxIdle, { recursive: true });
     writeFileSync(join(ctx.sandboxIdle, 'sessions'), 'not a dir');
 
     const code = await runInstall({});
     expect(code).toBe(1);
     expect(ctx.captured.stderr).toContain(
-      'sessions exists but is not a directory',
+      '~/.idle/sessions exists but is not a directory',
     );
     expect(existsSync(ctx.settingsPath)).toBe(false);
+  });
+
+  test('preflight: refuses when ~/.idle/ is a regular file (no writes occur)', async () => {
+    // Remove the sandbox dir and re-create as a file.
+    rmSync(ctx.sandboxIdle, { recursive: true, force: true });
+    writeFileSync(ctx.sandboxIdle, 'not a directory');
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toMatch(
+      /~\/\.idle (exists but is not a directory|is not writable)/,
+    );
+    expect(existsSync(ctx.settingsPath)).toBe(false);
+
+    // Restore so afterEach's rmSync doesn't choke.
+    rmSync(ctx.sandboxIdle, { force: true });
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+  });
+
+  test('preflight: refuses when ~/.idle/ is not writable (no writes occur)', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    // chmod 0o555: readable + executable, NOT writable.
+    chmodSync(ctx.sandboxIdle, 0o555);
+
+    const code = await runInstall({});
+    expect(code).toBe(1);
+    expect(ctx.captured.stderr).toContain('~/.idle is not writable');
+    expect(existsSync(ctx.settingsPath)).toBe(false);
+
+    // Restore write permissions so afterEach's rmSync works.
+    chmodSync(ctx.sandboxIdle, 0o755);
   });
 
   test('fresh install provisions all runtime files (Decision UU, PRD §6.1)', async () => {
