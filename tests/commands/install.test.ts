@@ -202,6 +202,28 @@ describe('runInstall', () => {
     expect(existsSync(ctx.settingsPath)).toBe(false);
   });
 
+  test('refuses to proceed when state.json exists as a directory', async () => {
+    mkdirSync(join(ctx.sandboxIdle, 'state.json'), { recursive: true });
+    await expect(runInstall({})).rejects.toThrow(
+      /state\.json exists but is not a regular file/,
+    );
+  });
+
+  test('refuses to proceed when debug.log exists as a directory', async () => {
+    mkdirSync(join(ctx.sandboxIdle, 'debug.log'), { recursive: true });
+    await expect(runInstall({})).rejects.toThrow(
+      /debug\.log exists but is not a regular file/,
+    );
+  });
+
+  test('refuses to proceed when sessions/ exists as a file', async () => {
+    mkdirSync(ctx.sandboxIdle, { recursive: true });
+    writeFileSync(join(ctx.sandboxIdle, 'sessions'), 'not a dir');
+    await expect(runInstall({})).rejects.toThrow(
+      /sessions exists but is not a directory/,
+    );
+  });
+
   test('fresh install provisions all runtime files (Decision UU, PRD §6.1)', async () => {
     const code = await runInstall({});
     expect(code).toBe(0);

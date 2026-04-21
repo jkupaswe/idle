@@ -215,9 +215,13 @@ export function writeConfigLoadError(
 export function provisionIdleHome(): void {
   const home = idleHome();
   mkdirSync(home, { recursive: true });
-  mkdirSync(idleSessionsDir(), { recursive: true });
+
+  const sessionsPath = idleSessionsDir();
+  assertIsDirectoryOrMissing(sessionsPath, '~/.idle/sessions');
+  mkdirSync(sessionsPath, { recursive: true });
 
   const statePath = join(home, 'state.json');
+  assertIsFileOrMissing(statePath, '~/.idle/state.json');
   try {
     writeFileSync(
       statePath,
@@ -228,5 +232,37 @@ export function provisionIdleHome(): void {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
 
-  writeFileSync(join(home, 'debug.log'), '', { flag: 'a' });
+  const logPath = join(home, 'debug.log');
+  assertIsFileOrMissing(logPath, '~/.idle/debug.log');
+  writeFileSync(logPath, '', { flag: 'a' });
+}
+
+function assertIsFileOrMissing(path: string, label: string): void {
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  if (!stat.isFile()) {
+    throw new Error(
+      `${label} exists but is not a regular file: ${path}. Remove it and re-run.`,
+    );
+  }
+}
+
+function assertIsDirectoryOrMissing(path: string, label: string): void {
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `${label} exists but is not a directory: ${path}. Remove it and re-run.`,
+    );
+  }
 }
