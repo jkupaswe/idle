@@ -125,7 +125,12 @@ export class ConfigValidationError extends Error {
 // Defaults
 // ---------------------------------------------------------------------------
 
-const NOTIFICATION_METHODS = ['native', 'terminal', 'both'] as const;
+/** Runtime-checkable list of valid notification-method values. */
+export const NOTIFICATION_METHODS: readonly NotificationMethod[] = [
+  'native',
+  'terminal',
+  'both',
+] as const;
 
 /**
  * Factory for the default Idle config. Returns a fresh object per call so

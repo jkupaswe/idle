@@ -541,7 +541,15 @@ function atomicWriteJson(path: string, value: unknown): void {
  * tests can verify both layouts end up at the same directory without
  * reaching into import.meta.url.
  */
-function defaultHooksDir(): string {
+/**
+ * Resolves to `<pkg-root>/src/hooks/` by default. Honors
+ * `IDLE_HOOKS_DIR` as a full-directory override so tests can supply
+ * stubbed hook scripts without mutating the source tree. The override
+ * follows the same pattern as `IDLE_CLAUDE_SETTINGS_PATH`.
+ */
+export function defaultHooksDir(): string {
+  const override = process.env.IDLE_HOOKS_DIR;
+  if (override && override.length > 0) return override;
   return resolveHooksDirFromModule(fileURLToPath(import.meta.url));
 }
 
