@@ -21,6 +21,12 @@ import type { NotificationMethod } from '../lib/types.js';
 
 const execFileP = promisify(execFile);
 
+// Per-subprocess wall-clock ceiling (Decision RR). 2000ms is the literal
+// budget applied to osascript, notify-send, and which below. Stop is
+// `async: false`, so an unbounded native-notifier call would block the
+// user's next turn forever when a notifier wedges. Delivery is well under
+// 2s on a healthy system; anything past that is a hang.
+
 export interface NotifyInput {
   /** Notification title (usually `"Idle"`). */
   title: string;
@@ -111,7 +117,9 @@ export function buildMacAppleScript(input: NotifyInput): string {
 
 async function sendMac(input: NotifyInput): Promise<void> {
   const script = buildMacAppleScript(input);
-  await execFileP('osascript', ['-e', script]);
+  await execFileP('osascript', ['-e', script], {
+    timeout: 2000,
+  });
 }
 
 async function sendLinux(input: NotifyInput): Promise<void> {
@@ -122,12 +130,16 @@ async function sendLinux(input: NotifyInput): Promise<void> {
   // delivering the notification. `execFile` already protects against shell
   // injection; `--` closes the argv-level equivalent.
   const args = ['--', input.title, input.body];
-  await execFileP('notify-send', args);
+  await execFileP('notify-send', args, {
+    timeout: 2000,
+  });
 }
 
 async function hasNotifySend(): Promise<boolean> {
   try {
-    await execFileP('which', ['notify-send']);
+    await execFileP('which', ['notify-send'], {
+      timeout: 2000,
+    });
     return true;
   } catch {
     return false;
