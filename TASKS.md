@@ -677,3 +677,28 @@ JSDoc comment noting it's an absolute path. Brand it as `AbsolutePath`
 so callers cannot pass a relative path. Small refactor, catches a whole 
 class of potential bugs at compile time. Appropriate for end-of-Wave-2 
 polish.
+
+### F-007 — Distinguish pre-write vs post-write timeout in state layer
+**Status:** Open, v1.1 scope
+**Origin:** Surfaced during T-010 implementation review.
+**Description:** `_updateState()` treats any timeout as a single
+outcome, but the correctness implications differ: pre-write
+timeout means disk is unchanged (safe to retry), post-write
+timeout means disk is mutated (must not silently retry). The
+Stop hook currently accepts occasional false-positive
+notifications as a consequence. A state-layer fix would
+distinguish the two cases via discriminated result:
+`timeout_before_write` vs `timeout_after_write`. Approximately
+60 lines of Core change + test updates.
+
+### F-009 — Non-blocking native notifier delivery
+**Status:** Open, v1.1 scope
+**Origin:** Surfaced during T-010 implementation review.
+**Description:** `notify()` currently blocks the calling hook on
+native subprocess delivery (up to 2s per attempt with the
+Decision RR timeout). Refactoring native delivery to a detached
+fire-and-forget pattern would eliminate user-visible block time
+on Stop from notification delivery. Tradeoff: can't confirm
+delivery success from the hook. Probably worth it for Stop
+specifically (which is async:false), less clear for other
+hooks.
