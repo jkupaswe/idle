@@ -5,24 +5,68 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 const execFileMock = vi.hoisted(() => vi.fn());
 
 vi.mock('node:child_process', () => ({
+  // Support both `execFile(cmd, args, cb)` and
+  // `execFile(cmd, args, options, cb)` — the latter is used after Decision RR
+  // (2s timeouts on every native subprocess call). When the caller passes a
+  // `timeout`, the mock honors it with an internal timer so tests can
+  // simulate a wedged osascript / notify-send / which.
   execFile: (
     cmd: string,
     args: string[],
-    cb: (err: Error | null, out: { stdout: string; stderr: string }) => void,
+    optionsOrCb: unknown,
+    maybeCb?: unknown,
   ) => {
+    let options: { timeout?: number };
+    let cb: (
+      err: Error | null,
+      out: { stdout: string; stderr: string },
+    ) => void;
+    if (typeof optionsOrCb === 'function') {
+      options = {};
+      cb = optionsOrCb as typeof cb;
+    } else {
+      options = (optionsOrCb as { timeout?: number }) ?? {};
+      cb = maybeCb as typeof cb;
+    }
+
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const settle = (
+      err: Error | null,
+      out: { stdout: string; stderr: string },
+    ) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      cb(err, out);
+    };
+
+    if (typeof options.timeout === 'number' && options.timeout > 0) {
+      timer = setTimeout(() => {
+        const err = Object.assign(new Error('Command timed out'), {
+          killed: true,
+          signal: 'SIGTERM',
+        });
+        settle(err, { stdout: '', stderr: '' });
+      }, options.timeout);
+    }
+
     try {
       const result = execFileMock(cmd, args);
       if (result && typeof result.then === 'function') {
         result.then(
           (r: { stdout?: string; stderr?: string } | undefined) =>
-            cb(null, { stdout: r?.stdout ?? '', stderr: r?.stderr ?? '' }),
-          (err: Error) => cb(err, { stdout: '', stderr: '' }),
+            settle(null, {
+              stdout: r?.stdout ?? '',
+              stderr: r?.stderr ?? '',
+            }),
+          (err: Error) => settle(err, { stdout: '', stderr: '' }),
         );
       } else {
-        cb(null, { stdout: '', stderr: '' });
+        settle(null, { stdout: '', stderr: '' });
       }
     } catch (err) {
-      cb(err as Error, { stdout: '', stderr: '' });
+      settle(err as Error, { stdout: '', stderr: '' });
     }
   },
 }));
@@ -329,6 +373,58 @@ describe('notify method: explicit native and unknown', () => {
     expect(execFileMock.mock.calls[0]![0]).toBe('osascript');
     expect(stderrSpy).not.toHaveBeenCalled();
   });
+});
+
+// ---- Decision RR: 2s subprocess timeouts bound native notifier delivery ----
+describe('notify subprocess timeouts (Decision RR)', () => {
+  test('darwin: wedged osascript times out near 2s; stderr fallback fires', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    // Mock returns a never-resolving promise. The mock's internal timer
+    // fires at options.timeout (2000ms) and signals a SIGTERM timeout —
+    // mirroring real execFile behavior when the subprocess wedges.
+    execFileMock.mockReturnValue(new Promise(() => {}));
+
+    const start = Date.now();
+    await notify({ title: 'Idle', body: 'hi' });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeGreaterThanOrEqual(1_900);
+    expect(elapsed).toBeLessThan(2_500);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: hi\n');
+  }, 5_000);
+
+  test('linux: wedged notify-send times out near 2s; stderr fallback fires', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    execFileMock
+      // which resolves quickly
+      .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
+      // notify-send wedges
+      .mockReturnValueOnce(new Promise(() => {}));
+
+    const start = Date.now();
+    await notify({ title: 'Idle', body: 'hi' });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeGreaterThanOrEqual(1_900);
+    expect(elapsed).toBeLessThan(2_500);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: hi\n');
+  }, 5_000);
+
+  test('linux: wedged `which` times out; stderr fallback, notify-send never attempted', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    execFileMock.mockReturnValue(new Promise(() => {}));
+
+    const start = Date.now();
+    await notify({ title: 'Idle', body: 'hi' });
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeGreaterThanOrEqual(1_900);
+    expect(elapsed).toBeLessThan(2_500);
+    // Only the wedged `which` call was issued; notify-send wasn't spawned.
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock.mock.calls[0]).toEqual(['which', ['notify-send']]);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: hi\n');
+  }, 5_000);
 });
 
 describe('notify promise contract', () => {
