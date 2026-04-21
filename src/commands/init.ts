@@ -130,7 +130,7 @@ export async function runInit(): Promise<number> {
 
   // Snapshot pre-install config bytes so a mid-install failure can
   // restore the user's customizations rather than clobber them.
-  const preInstallConfig = snapshotConfig();
+  const preExistingConfigBytes = snapshotConfig();
 
   // Hooks first, config second — a failed install must not leave a
   // stray config.toml behind (PRD §6.1 "restore exact prior state").
@@ -146,7 +146,7 @@ export async function runInit(): Promise<number> {
       settingsPath: result.settingsPath,
       backupPath: result.backupPath,
     });
-    restoreConfigSnapshot(preInstallConfig);
+    restoreConfigSnapshot(preExistingConfigBytes);
     return 1;
   }
 

@@ -56,7 +56,7 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
   // If a later step fails we restore byte-for-byte (or unlink if the
   // file didn't exist pre-install) — otherwise a failed install would
   // clobber the user's customizations.
-  const preInstallConfig = snapshotConfig();
+  const preExistingConfigBytes = snapshotConfig();
 
   // Hooks first, config second — a failed install must not leave a
   // stray or reset config.toml on disk.
@@ -72,7 +72,7 @@ export async function runInstall(options: InstallCliOptions): Promise<number> {
       settingsPath: result.settingsPath,
       backupPath: result.backupPath,
     });
-    restoreConfigSnapshot(preInstallConfig);
+    restoreConfigSnapshot(preExistingConfigBytes);
     return 1;
   }
 
