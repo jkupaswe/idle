@@ -582,6 +582,8 @@ This ticket composes several established primitives. The specific composition is
 
 ### T-017: bin/idle + build config (CLI) — MERGED INTO T-014
 
+**Status:** Resolved by T-014 (F-001) and T-013. No code shipped under T-017 itself.
+
 **Note:** Much of T-017's original scope (creating `bin/idle`, package.json bin field, tarball shape) is now part of T-014 (F-001 resolution). T-017 shrinks to a verification ticket.
 
 **Files:** none new
@@ -590,6 +592,8 @@ This ticket composes several established primitives. The specific composition is
 - `npm link && idle --help` works as a manual sanity check.
 - `npm pack --dry-run` tarball shape test (added in T-014) passes in CI.
 - If T-014 landed these correctly, T-017 is a no-op ticket that gets closed as "subsumed by T-014."
+
+**Resolution summary:** `tests/core/package.test.ts` (T-014) covers tarball shape — bin entries, files allowlist, hook scripts, forbidden paths. `tests/commands/cli.test.ts` (T-013) covers `bin/idle` executable bit, direct shebang exec, `--help`, `--version`. CI workflow creation remains Architect scope (`.github/workflows/ci.yml`); the test is ready to run under any CI that executes `vitest run`.
 
 ---
 
