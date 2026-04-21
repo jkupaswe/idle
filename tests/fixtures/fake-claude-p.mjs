@@ -12,10 +12,13 @@
  *   --exit <N>                Process exit code (default: 0).
  *   --sleep-ms <N>            Sleep before exiting (default: 0). Used for
  *                             the timeout integration test.
- *   --self-kill-after-ms <N>  After N ms, self-signal SIGKILL. Used to
- *                             prove `execClaudeLike` categorizes non-SIGTERM
- *                             signals as `'killed'` without needing to
- *                             expose the child handle.
+ *   --self-kill-after-ms <N>  After N ms, self-signal (default SIGKILL).
+ *                             Used to prove `execClaudeLike` categorizes
+ *                             non-SIGTERM signals as `'killed'` without
+ *                             needing to expose the child handle.
+ *   --self-signal <NAME>      Signal name for --self-kill-after-ms
+ *                             (default: SIGKILL). Used to distinguish
+ *                             self-inflicted SIGTERM from timeout-SIGTERM.
  *
  * No env vars, no IDLE_CLAUDE_BINARY, no production code paths touched.
  */
@@ -27,6 +30,7 @@ function parseArgs(argv) {
     exit: 0,
     sleepMs: 0,
     selfKillAfterMs: null,
+    selfSignal: 'SIGKILL',
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -50,6 +54,10 @@ function parseArgs(argv) {
         break;
       case '--self-kill-after-ms':
         args.selfKillAfterMs = Number(value ?? 0);
+        i++;
+        break;
+      case '--self-signal':
+        args.selfSignal = String(value ?? 'SIGKILL');
         i++;
         break;
       default:
@@ -78,7 +86,7 @@ async function main() {
 
   if (args.selfKillAfterMs !== null && args.selfKillAfterMs >= 0) {
     setTimeout(() => {
-      process.kill(process.pid, 'SIGKILL');
+      process.kill(process.pid, args.selfSignal);
     }, args.selfKillAfterMs).unref();
   }
 

@@ -91,11 +91,13 @@ function categorize(err: unknown): ClaudeResult {
     return { ok: false, reason: 'enoent' };
   }
 
-  // The timeout option kills with the default signal (SIGTERM). Any other
-  // terminating signal reaching the child — oom-killer, explicit SIGKILL,
-  // user Ctrl+C — is categorized as `killed` so the hook doesn't conflate
-  // it with a timeout.
-  if (e.signal === 'SIGTERM') {
+  // The timeout option kills with the default signal (SIGTERM) and sets
+  // `err.killed = true`. Externally delivered SIGTERM (e.g. parent
+  // orchestrator, `kill` from another tool) must NOT be classified as a
+  // timeout — execFile only sets `killed` when IT initiated the kill
+  // (timeout / maxBuffer). Without the killed=true guard the helper
+  // misreports foreign SIGTERMs (codex-review-2 finding 3).
+  if (e.signal === 'SIGTERM' && e.killed === true) {
     log('debug', 'invoke-claude-p: timed out', {
       timeout_signal: e.signal,
       stderr: stderr.length > 0 ? truncate(stderr) : undefined,
@@ -105,6 +107,7 @@ function categorize(err: unknown): ClaudeResult {
   if (typeof e.signal === 'string' && e.signal.length > 0) {
     log('debug', 'invoke-claude-p: killed by signal', {
       signal: e.signal,
+      killed: e.killed === true,
       stderr: stderr.length > 0 ? truncate(stderr) : undefined,
     });
     return { ok: false, reason: 'killed' };

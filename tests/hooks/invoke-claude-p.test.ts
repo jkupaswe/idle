@@ -235,6 +235,30 @@ describe('invokeClaudeP (UNIT — mocked child_process)', () => {
     expect(res).toEqual({ ok: false, reason: 'killed' });
   });
 
+  test('external SIGTERM (killed=false) maps to reason=killed, NOT timeout (codex-review-2 finding 3)', async () => {
+    // execFile only sets `killed: true` when IT initiated the kill
+    // (timeout / maxBuffer). Foreign SIGTERM from another process must
+    // not be reported as a timeout — the debug log would mislead and the
+    // helper's stated semantics break.
+    const err = Object.assign(new Error('killed'), {
+      killed: false,
+      signal: 'SIGTERM',
+    });
+    execFileMock.mockRejectedValue(err);
+    const res = await invokeClaudeP('p');
+    expect(res).toEqual({ ok: false, reason: 'killed' });
+  });
+
+  test('external SIGKILL (killed=false) maps to reason=killed', async () => {
+    const err = Object.assign(new Error('killed'), {
+      killed: false,
+      signal: 'SIGKILL',
+    });
+    execFileMock.mockRejectedValue(err);
+    const res = await invokeClaudeP('p');
+    expect(res).toEqual({ ok: false, reason: 'killed' });
+  });
+
   test('uncategorized error maps to reason=nonzero (safe fallback)', async () => {
     // Plain Error with no code / killed / signal: treat as a generic failure
     // so the hook falls through to the silent body rather than crashing.
@@ -317,6 +341,28 @@ describe('execClaudeLike (INTEGRATION — real execFile)', () => {
         FIXTURE_PATH,
         '--self-kill-after-ms',
         '100',
+        '--sleep-ms',
+        '2000',
+      ],
+      5_000,
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toBe('killed');
+  });
+
+  test('self-SIGTERM is not misclassified as timeout (codex-review-2 finding 3)', async () => {
+    // Fixture sends SIGTERM to itself well before the execClaudeLike
+    // deadline. If the helper looked only at `signal === 'SIGTERM'` it
+    // would call this a timeout; the real answer is `killed` because
+    // execFile did not initiate the kill (killed=false).
+    const res = await execClaudeLike(
+      process.execPath,
+      [
+        FIXTURE_PATH,
+        '--self-kill-after-ms',
+        '100',
+        '--self-signal',
+        'SIGTERM',
         '--sleep-ms',
         '2000',
       ],
