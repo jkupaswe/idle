@@ -43,7 +43,7 @@ import {
 } from '../core/config.js';
 import { notify } from '../core/notify.js';
 import type { NotifyInput } from '../core/notify.js';
-import { consumePendingCheckin, takeSessionSnapshot } from '../core/state.js';
+import { consumePendingCheckin } from '../core/state.js';
 import { log } from '../lib/log.js';
 import type {
   CheckInStats,
@@ -96,19 +96,6 @@ export async function run(input: string): Promise<number> {
     }
 
     const sessionId: SessionId = payload.session_id;
-
-    // Probe the pending flag via a non-locking synchronous snapshot BEFORE
-    // calling consume. `_updateState` can time out at any of six phases:
-    // five of them pre-write (lock acquire, read, mutate) leave the flag
-    // untouched; only a post-write deadline overshoot risks silent loss.
-    // Without this probe we couldn't distinguish, so the round-1 fix fired
-    // tier-3 on every timeout — producing false positives for sessions
-    // that weren't pending to begin with (codex-review-2 finding 1).
-    const preSnapshot = takeSessionSnapshot(sessionId);
-    const wasPending =
-      preSnapshot.ok === true &&
-      preSnapshot.snapshot.pending_checkin === true;
-
     const consume = await consumePendingCheckin(sessionId);
 
     if (!consume.ok) {
@@ -125,26 +112,16 @@ export async function run(input: string): Promise<number> {
           });
           return 0;
         case 'timeout':
-          if (!wasPending) {
-            // Pre-probe showed no pending flag, so no check-in was at risk.
-            // A timeout here means lock contention / slow disk, not silent
-            // loss. Exit silently — this matches the pre-round-1 design
-            // contract for sessions where a notification wasn't warranted.
-            log(
-              'debug',
-              'stop: consume timed out; flag was not pending, no notify',
-              { session_id: sessionId },
-            );
-            return 0;
-          }
-          // Pre-probe showed pending=true. `_updateState` enforces its
-          // deadline before AND after the atomic write, so we can't tell
-          // whether the flag was cleared on disk. Prefer a possibly-
-          // duplicate tier-3 notification over silent loss; the next Stop
-          // will retry cleanly if the write never landed.
+          // `_updateState` folds every deadline overshoot into a single
+          // `timeout` result regardless of whether the atomic write
+          // landed. Firing tier-3 unconditionally prefers a possibly-
+          // spurious "Idle check-in" over silently dropping a real
+          // check-in — see docs/known-limitations.md and F-007 for the
+          // pre-/post-write distinguisher that would fix this at the
+          // Core layer.
           log(
             'warn',
-            'stop: consume timed out with pending flag set → tier-3 to avoid silent loss',
+            'stop: consume timed out; firing tier-3 (see docs/known-limitations.md)',
             { session_id: sessionId },
           );
           await notifyTimeoutTier3();
