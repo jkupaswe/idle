@@ -136,16 +136,9 @@ describe('unknown command', () => {
 });
 
 describe('stubbed subcommands', () => {
-  // init/install/uninstall were implemented in T-014 and no longer emit
-  // the "not yet implemented" stub. The remaining commands are still
-  // stubbed pending T-015 and T-016.
-  const subcommands = [
-    'stats',
-    'status',
-    'enable',
-    'disable',
-    'doctor',
-  ] as const;
+  // init/install/uninstall landed in T-014; stats/status/enable/disable
+  // landed in T-015. `doctor` remains stubbed until T-016.
+  const subcommands = ['doctor'] as const;
 
   for (const name of subcommands) {
     test(`\`idle ${name}\` exits 1 with "not yet implemented"`, async () => {

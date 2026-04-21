@@ -12,6 +12,7 @@ import type { Buffer } from 'node:buffer';
 import { delimiter, dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+import { asAbsolutePath } from '../core/config.js';
 import type { ConfigParseError, ConfigValidationError } from '../core/config.js';
 import {
   IDLE_HOOK_EVENTS,
@@ -26,8 +27,24 @@ import {
   idleHome,
   idleSessionsDir,
 } from '../lib/paths.js';
+import type { AbsolutePath } from '../lib/types.js';
 
 const CLAUDE_URL = 'https://claude.com/product/claude-code';
+
+/**
+ * Resolve `process.cwd()` as a branded `AbsolutePath`. Throws a terse
+ * user-facing `Error` when cwd isn't absolute (rare — happens on POSIX
+ * when the working directory was deleted out from under the process).
+ * Commands catch and print to stderr with exit 1.
+ */
+export function projectCwd(): AbsolutePath {
+  const raw = process.cwd();
+  try {
+    return asAbsolutePath(raw);
+  } catch {
+    throw new Error(`idle: current directory is not an absolute path: ${raw}`);
+  }
+}
 
 /**
  * Full install preflight. Runs every check that can fail without a
