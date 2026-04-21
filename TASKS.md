@@ -497,7 +497,7 @@ This ticket composes several established primitives. The specific composition is
 - **The `bin/idle` entry point and `package.json` "bin" field are restored in this ticket (F-001).** Concretely:
   - `bin/idle` JS shim is created (per T-013's pattern — they may be done together).
   - `package.json` has `"bin": { "idle": "./bin/idle" }`.
-  - `package.json` `files` allowlist includes `bin`, `src`, `README.md`, `LICENSE`.
+  - `package.json` `files` allowlist includes `bin`, `src`, `LICENSE`. `README.md` addition is deferred to T-018 along with README creation.
   - A new test file `tests/core/package.test.ts` asserts that `npm pack --dry-run` output includes every path referenced in `package.json`'s `bin`, `main`, `exports`, and `files` fields. This test runs in CI going forward.
 - **Install and uninstall results:** `installHooks()` and `uninstallHooks()` return discriminated-result types. The CLI commands pattern-match on these and print user-facing messages matching the Idle voice:
   - `installHooks()` success with `backupPath`: "Installed. Previous settings backed up to \<path\>."
@@ -593,9 +593,13 @@ This ticket composes several established primitives. The specific composition is
 ### T-018: README (Docs)
 
 **Depends on:** T-014, T-015, T-016
-**Files:** `README.md`
+**Files:** `README.md`, `package.json`
 
 **Description:** The README is the product's marketing. It's what gets posted to HN.
+
+#### Architectural landmarks for this ticket
+
+- This ticket re-adds `README.md` to `package.json`'s `files` allowlist. T-014 intentionally omitted `README.md` because the file didn't exist and the F-001 tarball test rejects stale declarations. Once this ticket creates the README, the allowlist entry and file can land together.
 
 **Acceptance:**
 - Opens with the one-liner: "A break timer that meters your tokens, not your minutes." (or the agreed final version)
