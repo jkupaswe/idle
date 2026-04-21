@@ -135,22 +135,7 @@ describe('unknown command', () => {
   });
 });
 
-describe('stubbed subcommands', () => {
-  // init/install/uninstall were implemented in T-014 and no longer emit
-  // the "not yet implemented" stub. doctor was implemented in T-016.
-  // The remaining commands are still stubbed pending T-015.
-  const subcommands = [
-    'stats',
-    'status',
-    'enable',
-    'disable',
-  ] as const;
-
-  for (const name of subcommands) {
-    test(`\`idle ${name}\` exits 1 with "not yet implemented"`, async () => {
-      const { stderr, code } = await runCli([name], { IDLE_HOME: sandbox });
-      expect(code).toBe(1);
-      expect(stderr).toContain(`idle: ${name} not yet implemented`);
-    });
-  }
-});
+// All subcommands are implemented as of T-014 (init/install/uninstall),
+// T-015 (stats/status/enable/disable), and T-016 (doctor) — no "not yet
+// implemented" stubs remain. The notImplemented helper in `_stub.ts`
+// stays in place for any future commands added before their handler.
