@@ -717,3 +717,20 @@ the final T-014 consolidation). Runtime files (`state.json`,
 A full transaction model would snapshot all three filesystem surfaces
 pre-install and restore all three on any failure. Approximately
 80-120 lines of CLI + test changes.
+
+### F-011 — Flaky post-tool-use and state tests under parallel load
+**Status:** Open, medium priority
+**Origin:** Reported during T-015 PR #22 and T-016 PR #23 
+reviews (two independent sightings from different agent 
+workspaces).
+**Description:** tests/hooks/post-tool-use.test.ts and 
+tests/core/state.test.ts intermittently trip `timeout` vs 
+`not_found` assertions when the full vitest suite runs under 
+parallel I/O load. All affected tests pass consistently in 
+isolation. Two independent agent workspaces have observed the 
+pattern, suggesting a real state-layer concurrency edge case 
+rather than harness flakiness. Options: (a) widen timing 
+tolerance in the affected tests, (b) use fake timers, (c) 
+investigate whether _updateState's lock acquisition has a 
+genuine race with heavy concurrent callers. Resolve before 
+v1.1 release.
