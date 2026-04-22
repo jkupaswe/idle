@@ -53,15 +53,22 @@ const DISABLED_THRESHOLDS: Readonly<ThresholdsConfig> = {
 };
 
 let tmp: string;
+let idleHome: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'idle-deadline-'));
   WRITE_DELAY.ms = 0;
+  // Sandbox log destination (F-015): lock-timeout warnings from the
+  // deadline test otherwise land in ~/.idle/debug.log.
+  idleHome = mkdtempSync(join(tmpdir(), 'idle-deadline-home-'));
+  process.env.IDLE_HOME = idleHome;
 });
 
 afterEach(() => {
   WRITE_DELAY.ms = 0;
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.IDLE_HOME;
+  rmSync(idleHome, { recursive: true, force: true });
 });
 
 describe('wall-clock deadline', () => {

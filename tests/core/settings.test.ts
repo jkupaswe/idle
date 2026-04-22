@@ -25,13 +25,21 @@ import {
 } from '../../src/core/settings.js';
 
 let tmp: string;
+let idleHome: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'idle-settings-'));
+  // Sandbox log destination (F-015): settings.ts logs on lock-release or
+  // lock-acquisition failures; those warnings must not escape to the
+  // production ~/.idle/debug.log during tests.
+  idleHome = mkdtempSync(join(tmpdir(), 'idle-settings-home-'));
+  process.env.IDLE_HOME = idleHome;
 });
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.IDLE_HOME;
+  rmSync(idleHome, { recursive: true, force: true });
 });
 
 function settingsPath(): string {

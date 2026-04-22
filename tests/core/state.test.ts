@@ -45,13 +45,21 @@ const SESSION_A = narrow('11111111-2222-3333-4444-555555555555');
 const SESSION_B = narrow('22222222-3333-4444-5555-666666666666');
 
 let tmp: string;
+let idleHome: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'idle-state-'));
+  // Sandbox log destination so state warnings (dropping malformed entries,
+  // corrupt JSON recovery, lock timeouts) don't pollute ~/.idle/debug.log.
+  // F-015: log.ts routes through idleDebugLog() which honors IDLE_HOME.
+  idleHome = mkdtempSync(join(tmpdir(), 'idle-state-home-'));
+  process.env.IDLE_HOME = idleHome;
 });
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.IDLE_HOME;
+  rmSync(idleHome, { recursive: true, force: true });
 });
 
 function statePath(): string {
