@@ -24,11 +24,14 @@ Not tracked for change; this is the product design.
 
 ### Terminal notification on Windows
 
-On Windows, Idle falls back to writing terminal-mode notifications to
-stderr instead of `/dev/tty` (which doesn't exist on Windows). If Claude
-Code on Windows captures hook stderr, terminal-mode notifications may be
-invisible. Windows users are recommended to use `method='native'` for
-reliable delivery.
+On Windows, Idle has no native notification path yet — neither
+`osascript` (macOS) nor `notify-send` (Linux) is available. All
+notification methods fall through to stderr, which Claude Code captures
+and does not forward to the user's terminal. Terminal delivery on
+Windows is best-effort in v1 and may be invisible inside Claude Code
+sessions. Native Windows notification support (via toast notifications
+or the Windows notification API) is tracked as a v1.1 follow-up
+(F-016).
 
 ## Install / uninstall edge cases
 

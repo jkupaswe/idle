@@ -795,3 +795,13 @@ TTY (piped, detached, CI), the write falls back to `process.stderr` —
 the previous behavior. Never-throw contract preserved; method dispatch
 unchanged. Windows stderr limitation documented in
 `docs/known-limitations.md`.
+
+### F-016 — Native Windows notification support
+**Status:** Open, v1.1 scope
+**Origin:** Surfaced during F-014 review. Current `notify.ts` has no
+Windows native path; all methods fall through to stderr which is
+captured by Claude Code. Windows users have no reliable delivery
+channel. Options: use `node-notifier` (existing npm package that wraps
+Windows toast notifications), or implement a minimal PowerShell-based
+BurntToast approach directly. ~50-80 LOC addition + cross-platform
+testing. Deferred to v1.1.
