@@ -3,18 +3,17 @@
  * not the real `~/.idle/debug.log`.
  *
  * During T-020 Phase 5 verification, the production debug log was polluted
- * by test-fixture strings because `log()` resolved its destination via
- * `os.homedir()` without honoring IDLE_HOME. `paths.idleDebugLog()` now
- * routes through IDLE_HOME and `log.ts` resolves the path at call time;
- * this test pins that invariant.
+ * by test-fixture strings from tests that did not set IDLE_HOME. `log.ts`
+ * routes through `paths.idleDebugLog()` at call time; this test pins that
+ * invariant.
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,14 +43,11 @@ describe('log destination honors IDLE_HOME', () => {
   test('writes to IDLE_HOME-scoped debug.log, not homedir', () => {
     process.env.IDLE_HOME = tempHome;
 
-    // Snapshot the real ~/.idle/debug.log size (may or may not exist).
+    const marker = `should-not-appear-in-real-log-${randomUUID()}`;
     const realLogPath = join(homedir(), '.idle', 'debug.log');
-    const sizeBefore = existsSync(realLogPath)
-      ? statSync(realLogPath).size
-      : 0;
 
     log('warn', 'f015 regression test', {
-      marker: 'should-not-appear-in-real-log',
+      marker,
     });
 
     // The sandboxed log has the line.
@@ -59,13 +55,14 @@ describe('log destination honors IDLE_HOME', () => {
     expect(existsSync(tempLogPath)).toBe(true);
     const tempContent = readFileSync(tempLogPath, 'utf8');
     expect(tempContent).toContain('f015 regression test');
-    expect(tempContent).toContain('should-not-appear-in-real-log');
+    expect(tempContent).toContain(marker);
 
-    // The real log did not grow.
-    const sizeAfter = existsSync(realLogPath)
-      ? statSync(realLogPath).size
-      : 0;
-    expect(sizeAfter).toBe(sizeBefore);
+    // The real log did not receive this test's unique marker. Avoid asserting
+    // file size: other Idle processes may legitimately append while tests run.
+    const realContent = existsSync(realLogPath)
+      ? readFileSync(realLogPath, 'utf8')
+      : '';
+    expect(realContent).not.toContain(marker);
   });
 
   test('resolves destination at call time, not import time', () => {
