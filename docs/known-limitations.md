@@ -22,6 +22,17 @@ Stop is installed with `async: false` so Claude Code blocks on its completion be
 
 Not tracked for change; this is the product design.
 
+### Terminal notification on Windows
+
+On Windows, Idle has no native notification path yet — neither
+`osascript` (macOS) nor `notify-send` (Linux) is available. All
+notification methods fall through to stderr, which Claude Code captures
+and does not forward to the user's terminal. Terminal delivery on
+Windows is best-effort in v1 and may be invisible inside Claude Code
+sessions. Native Windows notification support (via toast notifications
+or the Windows notification API) is tracked as a v1.1 follow-up
+(F-016).
+
 ## Install / uninstall edge cases
 
 ### Install failure during runtime-file provisioning

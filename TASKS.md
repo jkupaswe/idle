@@ -777,3 +777,31 @@ in &lt;500ms). The field is type-locked to the event name alongside
 `async` and `script`, so drift from the install-time values is a
 compile error. Defense-in-depth against future variants of the F-012
 class of bug.
+
+### F-014 — Terminal-mode notifications invisible inside Claude Code
+**Status:** Resolved by this PR
+**Origin:** T-020 Phase 5 integration verification
+**Description:** `method='both'` and `method='terminal'` wrote the break
+suggestion line via `process.stderr`. Claude Code's hook runner captures
+child-process stderr and does not forward it to the user's visible
+terminal, so the terminal half of both modes was silently invisible
+inside live hook execution — an isolation test with the same module
+(`npx tsx -e "..."`) produced the line, but a hook-context invocation
+did not. Fixed by routing the terminal write through `/dev/tty` (the
+controlling terminal), which is owned by the terminal emulator rather
+than the process tree and therefore bypasses hook-runner capture. On
+Windows (`/dev/tty` doesn't exist) and on hosts without a controlling
+TTY (piped, detached, CI), the write falls back to `process.stderr` —
+the previous behavior. Never-throw contract preserved; method dispatch
+unchanged. Windows stderr limitation documented in
+`docs/known-limitations.md`.
+
+### F-016 — Native Windows notification support
+**Status:** Open, v1.1 scope
+**Origin:** Surfaced during F-014 review. Current `notify.ts` has no
+Windows native path; all methods fall through to stderr which is
+captured by Claude Code. Windows users have no reliable delivery
+channel. Options: use `node-notifier` (existing npm package that wraps
+Windows toast notifications), or implement a minimal PowerShell-based
+BurntToast approach directly. ~50-80 LOC addition + cross-platform
+testing. Deferred to v1.1.
