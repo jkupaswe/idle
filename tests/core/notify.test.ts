@@ -614,3 +614,65 @@ describe('notify terminal write to /dev/tty (F-014)', () => {
     expect(fsMock.closeSync).toHaveBeenCalledWith(11);
   });
 });
+
+// ---- F-014: native-failure fallback also routes through /dev/tty --------
+//
+// When native delivery fails or is unavailable, the default/'native' path
+// writes the text line via writeTerminal — same /dev/tty-then-stderr chain
+// as method='terminal' and method='both'. Before F-014 this fallback went
+// straight to stderr, which Claude Code captured. These tests pin the new
+// behavior so a regression to direct-stderr would be caught.
+describe('notify native-failure fallback uses /dev/tty (F-014)', () => {
+  test('darwin: osascript fails → /dev/tty delivers the terminal line', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    fsMock.openSync.mockReturnValue(33);
+    execFileMock.mockRejectedValue(new Error('osascript boom'));
+
+    await notify({ title: 'Idle', body: 'body' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).toHaveBeenCalledWith(33, 'Idle: body\n');
+    expect(fsMock.closeSync).toHaveBeenCalledWith(33);
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  test('linux: notify-send missing → /dev/tty delivers the terminal line', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    fsMock.openSync.mockReturnValue(44);
+    execFileMock.mockRejectedValueOnce(new Error('which: not found'));
+
+    await notify({ title: 'Idle', body: 'hi' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock.mock.calls[0]).toEqual(['which', ['notify-send']]);
+    expect(fsMock.writeSync).toHaveBeenCalledWith(44, 'Idle: hi\n');
+    expect(fsMock.closeSync).toHaveBeenCalledWith(44);
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  test('darwin: osascript fails AND /dev/tty unavailable → stderr fallback', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    // beforeEach default: openSync throws ENOENT.
+    execFileMock.mockRejectedValue(new Error('osascript boom'));
+
+    await notify({ title: 'Idle', body: 'body' });
+
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: body\n');
+  });
+
+  test('linux: notify-send missing AND /dev/tty unavailable → stderr fallback', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    // beforeEach default: openSync throws ENOENT.
+    execFileMock.mockRejectedValueOnce(new Error('which: not found'));
+
+    await notify({ title: 'Idle', body: 'hi' });
+
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: hi\n');
+  });
+});
