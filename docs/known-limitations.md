@@ -22,6 +22,14 @@ Stop is installed with `async: false` so Claude Code blocks on its completion be
 
 Not tracked for change; this is the product design.
 
+### Terminal notification on Windows
+
+On Windows, Idle falls back to writing terminal-mode notifications to
+stderr instead of `/dev/tty` (which doesn't exist on Windows). If Claude
+Code on Windows captures hook stderr, terminal-mode notifications may be
+invisible. Windows users are recommended to use `method='native'` for
+reliable delivery.
+
 ## Install / uninstall edge cases
 
 ### Install failure during runtime-file provisioning
