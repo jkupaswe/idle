@@ -66,16 +66,23 @@ const DISABLED_THRESHOLDS: Readonly<ThresholdsConfig> = {
 };
 
 let tmp: string;
+let idleHome: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'idle-shortwrite-'));
   SHORT_WRITE.trigger = false;
   SHORT_WRITE.observedCalls = 0;
   SHORT_WRITE.shortWriteCount = 0;
+  // Sandbox log destination (F-015) in case any state-layer warning fires
+  // while the short-write mock is armed.
+  idleHome = mkdtempSync(join(tmpdir(), 'idle-shortwrite-home-'));
+  process.env.IDLE_HOME = idleHome;
 });
 
 afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.IDLE_HOME;
+  rmSync(idleHome, { recursive: true, force: true });
 });
 
 describe('short-write safety', () => {
