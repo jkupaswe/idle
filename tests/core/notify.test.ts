@@ -4,6 +4,28 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 // is what the module uses; we mirror that shape here.
 const execFileMock = vi.hoisted(() => vi.fn());
 
+// Mock the three `node:fs` calls used by the terminal-write path (F-014).
+// Keep every other `node:fs` export intact for other modules (log.ts uses
+// appendFileSync/mkdirSync). Default behavior is set in beforeEach:
+// `openSync('/dev/tty')` throws ENOENT so the stderr-fallback branch runs
+// for all legacy tests. Individual tests override for the /dev/tty-success
+// path.
+const fsMock = vi.hoisted(() => ({
+  openSync: vi.fn(),
+  writeSync: vi.fn(),
+  closeSync: vi.fn(),
+}));
+
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    openSync: fsMock.openSync,
+    writeSync: fsMock.writeSync,
+    closeSync: fsMock.closeSync,
+  };
+});
+
 vi.mock('node:child_process', () => ({
   // Support both `execFile(cmd, args, cb)` and
   // `execFile(cmd, args, options, cb)` — the latter is used after Decision RR
@@ -82,6 +104,18 @@ let stderrSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   execFileMock.mockReset();
+  fsMock.openSync.mockReset();
+  fsMock.writeSync.mockReset();
+  fsMock.closeSync.mockReset();
+  // Default: no controlling TTY available. writeTerminal falls through to
+  // stderr so existing tests that assert on `stderrSpy` keep working.
+  fsMock.openSync.mockImplementation(() => {
+    const err = new Error(
+      "ENOENT: no such file or directory, open '/dev/tty'",
+    ) as Error & { code?: string };
+    err.code = 'ENOENT';
+    throw err;
+  });
   stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 });
 
@@ -483,5 +517,100 @@ describe('notify promise contract', () => {
       notify({ title: 'Idle', body: 'stub' }),
     ).resolves.toBeUndefined();
     expect(stderrSpy).toHaveBeenCalled();
+  });
+});
+
+// ---- F-014: terminal writes go to /dev/tty first, stderr as fallback ----
+//
+// Claude Code's hook runner captures child-process stderr and doesn't
+// forward it to the user's visible terminal, which rendered the terminal
+// half of `method='terminal'` and `method='both'` invisible inside a live
+// hook. `/dev/tty` (the controlling terminal) is owned by the terminal
+// emulator rather than the process tree, so it bypasses that capture.
+describe('notify terminal write to /dev/tty (F-014)', () => {
+  test('darwin method=terminal writes via /dev/tty, not stderr', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    // openSync succeeds — we got a controlling terminal.
+    fsMock.openSync.mockReturnValue(99);
+
+    await notify({ title: 'Idle', body: 'walk', method: 'terminal' });
+
+    expect(fsMock.openSync).toHaveBeenCalledTimes(1);
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).toHaveBeenCalledTimes(1);
+    expect(fsMock.writeSync).toHaveBeenCalledWith(99, 'Idle: walk\n');
+    expect(fsMock.closeSync).toHaveBeenCalledWith(99);
+    // /dev/tty succeeded — stderr must not double-write.
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  test('linux method=both writes to /dev/tty alongside notify-send', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'linux';
+    fsMock.openSync.mockReturnValue(7);
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '/usr/bin/notify-send', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+
+    await notify({ title: 'Idle', body: 'stretch', method: 'both' });
+
+    expect(execFileMock.mock.calls[1]).toEqual([
+      'notify-send',
+      ['--', 'Idle', 'stretch'],
+    ]);
+    expect(fsMock.writeSync).toHaveBeenCalledWith(7, 'Idle: stretch\n');
+    expect(fsMock.closeSync).toHaveBeenCalledWith(7);
+    expect(stderrSpy).not.toHaveBeenCalled();
+  });
+
+  test('/dev/tty unavailable → falls back to stderr with the same line', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    // beforeEach already makes openSync throw ENOENT; assert the fallback.
+
+    await notify({ title: 'Idle', body: 'walk', method: 'terminal' });
+
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).not.toHaveBeenCalled();
+    expect(fsMock.closeSync).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: walk\n');
+  });
+
+  test('writeSync failure after open still closes fd and falls back to stderr', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    fsMock.openSync.mockReturnValue(42);
+    fsMock.writeSync.mockImplementation(() => {
+      throw new Error('EPIPE');
+    });
+
+    await notify({ title: 'Idle', body: 'walk', method: 'terminal' });
+
+    expect(fsMock.openSync).toHaveBeenCalledWith('/dev/tty', 'w');
+    expect(fsMock.writeSync).toHaveBeenCalledWith(42, 'Idle: walk\n');
+    // fd opened successfully — must be closed regardless of writeSync outcome.
+    expect(fsMock.closeSync).toHaveBeenCalledWith(42);
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: walk\n');
+  });
+
+  test('win32 skips /dev/tty entirely and writes stderr directly', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'win32';
+
+    await notify({ title: 'Idle', body: 'stub', method: 'terminal' });
+
+    expect(fsMock.openSync).not.toHaveBeenCalled();
+    expect(fsMock.writeSync).not.toHaveBeenCalled();
+    expect(fsMock.closeSync).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledWith('Idle: stub\n');
+  });
+
+  test('closeSync throwing does not propagate (never-throw contract)', async () => {
+    process.env.IDLE_NOTIFY_PLATFORM = 'darwin';
+    fsMock.openSync.mockReturnValue(11);
+    fsMock.closeSync.mockImplementation(() => {
+      throw new Error('EBADF');
+    });
+
+    await expect(
+      notify({ title: 'Idle', body: 'walk', method: 'terminal' }),
+    ).resolves.toBeUndefined();
+    expect(fsMock.closeSync).toHaveBeenCalledWith(11);
   });
 });

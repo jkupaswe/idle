@@ -2,18 +2,27 @@
  * Cross-platform native notifications.
  *
  * - macOS: shell out to `osascript` with AppleScript `display notification`.
- * - Linux: shell out to `notify-send` when present, else fall back to stderr.
- * - Other platforms: fall back to stderr.
+ * - Linux: shell out to `notify-send` when present, else fall back to the
+ *   terminal line.
+ * - Other platforms: fall back to the terminal line.
+ *
+ * Terminal delivery prefers `/dev/tty` on POSIX so the line survives hook
+ * runners that capture child-process stderr (Claude Code does). Falls back
+ * to `process.stderr` on Windows and whenever no controlling terminal is
+ * attached.
  *
  * Failures never throw. A Claude Code session must not break because a
  * notification couldn't be delivered.
  *
  * For tests, `IDLE_NOTIFY_PLATFORM` overrides `process.platform`, and the
  * module calls `child_process.execFile` (not `exec`), so mocks can be
- * installed via `vi.mock('node:child_process')`.
+ * installed via `vi.mock('node:child_process')`. Terminal writes go through
+ * `node:fs` `openSync`/`writeSync`/`closeSync`, so `vi.mock('node:fs')` can
+ * intercept them the same way.
  */
 
 import { execFile } from 'node:child_process';
+import { closeSync, openSync, writeSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 import { log } from '../lib/log.js';
@@ -36,9 +45,10 @@ export interface NotifyInput {
   sound?: boolean;
   /**
    * Delivery channel. Defaults to `'native'` (platform notifier with a
-   * stderr fallback). `'terminal'` writes only to stderr, `'both'` attempts
-   * native and writes to stderr independently. Unknown values are treated
-   * as `'native'` for forward compatibility.
+   * terminal-line fallback). `'terminal'` writes only to the user's
+   * terminal (prefers `/dev/tty`, falls back to stderr); `'both'` attempts
+   * native and writes to the terminal independently. Unknown values are
+   * treated as `'native'` for forward compatibility.
    */
   method?: NotificationMethod;
 }
@@ -47,17 +57,17 @@ export interface NotifyInput {
  * Trigger a notification. Resolves regardless of delivery outcome; failures
  * are logged. Dispatches on `input.method`:
  *
- * - `'native'` (default / unknown value): platform notifier with a stderr
+ * - `'native'` (default / unknown value): platform notifier with a terminal
  *   fallback on failure or on platforms that lack one.
- * - `'terminal'`: stderr only. The platform notifier is never invoked.
- * - `'both'`: native (best-effort) AND stderr. A native failure does not
- *   suppress the terminal line, and vice versa.
+ * - `'terminal'`: terminal line only. The platform notifier is never invoked.
+ * - `'both'`: native (best-effort) AND terminal line. A native failure does
+ *   not suppress the terminal line, and vice versa.
  */
 export async function notify(input: NotifyInput): Promise<void> {
   const { title, body, method } = input;
 
   if (method === 'terminal') {
-    writeStderr(title, body);
+    writeTerminal(title, body);
     return;
   }
 
@@ -84,10 +94,11 @@ export async function notify(input: NotifyInput): Promise<void> {
     });
   }
 
-  // 'both': always also write stderr, independent of native outcome.
-  // Default / 'native' / unknown: stderr only when native didn't deliver.
+  // 'both': always also write the terminal line, independent of native
+  // outcome. Default / 'native' / unknown: terminal line only when native
+  // didn't deliver.
   if (method === 'both' || !nativeDelivered) {
-    writeStderr(title, body);
+    writeTerminal(title, body);
   }
 }
 
@@ -147,15 +158,44 @@ async function hasNotifySend(): Promise<boolean> {
 }
 
 /**
- * Write the notification text to stderr, swallowing any error. The module
- * contract promises `notify()` never rejects — a stderr write that throws
- * (closed descriptor, EPIPE, monkey-patched host) must not propagate. The
- * previous implementation let the second-chance `writeStderr` inside the
- * top-level `catch` escape, which rejected the promise.
+ * Write the notification text to the user's terminal, swallowing any error.
+ * The module contract promises `notify()` never rejects — a write that
+ * throws (closed descriptor, EPIPE, monkey-patched host) must not propagate.
+ *
+ * On POSIX we prefer `/dev/tty` (the controlling terminal) over
+ * `process.stderr`. Claude Code's hook runner captures child-process stderr
+ * and does not forward it, so a stderr write in `method='terminal'` or
+ * `method='both'` is invisible to the user when Idle runs inside Claude
+ * Code. `/dev/tty` is owned by the terminal emulator rather than the
+ * process tree, so it bypasses that capture. On Windows (or when no
+ * controlling terminal is attached — piped, detached, CI) `/dev/tty` isn't
+ * available and we fall back to stderr, preserving the previous behavior.
  */
-function writeStderr(title: string, body: string): void {
+function writeTerminal(title: string, body: string): void {
+  const line = `${title}: ${body}\n`;
+
+  if (currentPlatform() !== 'win32') {
+    let fd: number | undefined;
+    try {
+      fd = openSync('/dev/tty', 'w');
+      writeSync(fd, line);
+      return;
+    } catch {
+      // No controlling TTY, permissions, or /dev/tty not writable. Fall
+      // through to the stderr last-resort below.
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   try {
-    process.stderr.write(`${title}: ${body}\n`);
+    process.stderr.write(line);
   } catch {
     // Intentionally empty. Losing a notification line is better than
     // breaking a Claude Code session.
