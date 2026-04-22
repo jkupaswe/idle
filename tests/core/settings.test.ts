@@ -286,6 +286,70 @@ describe('hook command format', () => {
       expect(isIdleOwnedCommand(cmd)).toBe(true);
     }
   });
+
+  test('each Idle hook entry has an explicit per-event timeout (F-013)', async () => {
+    // F-013: inheriting Claude Code's default (~5s per F-012 evidence) is
+    // too tight for Stop given `claude -p` latency. Pin explicit timeouts.
+    await install();
+    const settings = readJson<{
+      hooks: Record<
+        string,
+        Array<{
+          matcher: string;
+          hooks: Array<{ command: string; timeout?: unknown }>;
+        }>
+      >;
+    }>(settingsPath());
+
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
+      const entry = group.hooks.find((h) => h.command.includes(IDLE_TAG))!;
+      expect(entry.timeout, `event=${hook.event}`).toBe(hook.timeoutSeconds);
+    }
+  });
+
+  test('Stop has the longest timeout; async hooks share the shorter one', async () => {
+    // Stop's budget covers `claude -p` (8s) + native notification (~2s) +
+    // overhead; see docs/known-limitations.md. The three async hooks are
+    // short state-mutation paths — 10s is safety margin, not expected
+    // runtime.
+    const stop = IDLE_HOOK_EVENTS.find((h) => h.event === 'Stop')!;
+    const asyncHooks = IDLE_HOOK_EVENTS.filter((h) => h.event !== 'Stop');
+    expect(stop.timeoutSeconds).toBe(30);
+    for (const h of asyncHooks) {
+      expect(h.timeoutSeconds, `event=${h.event}`).toBe(10);
+      expect(h.timeoutSeconds).toBeLessThan(stop.timeoutSeconds);
+    }
+  });
+
+  test('async hooks keep both async:true and their timeout; Stop has timeout without async', async () => {
+    await install();
+    const settings = readJson<{
+      hooks: Record<
+        string,
+        Array<{
+          matcher: string;
+          hooks: Array<{
+            command: string;
+            async?: unknown;
+            timeout?: unknown;
+          }>;
+        }>
+      >;
+    }>(settingsPath());
+
+    for (const hook of IDLE_HOOK_EVENTS) {
+      const group = settings.hooks[hook.event]!.find((g) => g.matcher === '')!;
+      const entry = group.hooks.find((h) => h.command.includes(IDLE_TAG))!;
+      if (hook.async) {
+        expect(entry.async, `event=${hook.event}`).toBe(true);
+      } else {
+        // Stop must not carry async:true (or async:false) — the key is absent.
+        expect('async' in entry, `event=${hook.event}`).toBe(false);
+      }
+      expect(entry.timeout, `event=${hook.event}`).toBe(hook.timeoutSeconds);
+    }
+  });
 });
 
 describe('isIdleOwnedCommand predicate', () => {

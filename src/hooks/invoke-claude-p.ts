@@ -5,28 +5,29 @@
  * `invokeClaudeP()` returning `Promise<ClaudeResult>`; `execClaudeLike()`
  * is exported for integration tests against `tests/fixtures/fake-claude-p.mjs`.
  *
- * Uses `execFile` (not `spawn`, not `exec`) via `util.promisify` — argv
- * items are passed directly, no shell interpretation. LLM-generated prompt
- * content can contain backticks, `$()`, `;`, etc., but cannot escape into
- * a shell because there is no shell.
+ * Uses `spawn` with explicit `stdio: ['ignore', 'pipe', 'pipe']` (F-012).
+ * The `'ignore'` on stdin is load-bearing: the `claude` CLI blocks up to
+ * ~3s reading stdin before consuming the argv prompt. Under Claude Code's
+ * ~5s hook timeout, an open stdin pipe causes external SIGTERM before
+ * notification delivery (exit 143 in debug.log). Ignoring stdin gives the
+ * child immediate EOF. Argv is passed directly with no shell, so
+ * LLM-generated backticks / `$()` / `;` in the prompt cannot escape.
  *
  * stderr with zero exit is NOT a hard failure: logged at debug, stdout
  * still returned as `rawOutput`. Non-zero exit maps to `'nonzero'`.
- * ENOENT, timeout (SIGTERM from the timeout option), and other signals
+ * ENOENT, timeout (we initiate SIGTERM via setTimeout), and other signals
  * are categorized separately.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 
 import { log } from '../lib/log.js';
-
-const execFileP = promisify(execFile);
 
 /** Production timeout for `claude -p`. 8s per design Decision Y. */
 export const CLAUDE_P_TIMEOUT_MS = 8_000;
 
-/** Maximum stdout capture. Output is normalized to 200 chars downstream. */
+/** Maximum stdout/stderr capture. Output is normalized to 200 chars downstream. */
 export const CLAUDE_P_MAX_BUFFER = 64 * 1024;
 
 export type ClaudeResult =
@@ -48,87 +49,145 @@ export async function invokeClaudeP(prompt: string): Promise<ClaudeResult> {
 /**
  * Module-local helper. Production code does not call this directly; it
  * exists so integration tests can invoke the fake-claude fixture via
- * `process.execPath` and exercise real `execFile` timeout / ENOENT /
- * signal behavior without mocking `node:child_process`.
+ * `process.execPath` and exercise real spawn timeout / ENOENT / signal
+ * behavior without mocking `node:child_process`.
  */
 export async function execClaudeLike(
   binary: string,
   args: readonly string[],
   timeoutMs: number,
 ): Promise<ClaudeResult> {
-  try {
-    const { stdout, stderr } = await execFileP(binary, [...args], {
-      env: process.env,
-      timeout: timeoutMs,
-      maxBuffer: CLAUDE_P_MAX_BUFFER,
-      windowsHide: true,
-    });
-    if (typeof stderr === 'string' && stderr.length > 0) {
-      log('debug', 'invoke-claude-p: stderr on zero exit', {
-        stderr: truncate(stderr),
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(binary, [...args], {
+        env: process.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
+    } catch (err) {
+      // Synchronous spawn failure is rare on modern Node (ENOENT surfaces
+      // via 'error'), but be defensive.
+      const e = (err ?? {}) as { code?: string; message?: string };
+      if (e.code === 'ENOENT') {
+        log('debug', 'invoke-claude-p: binary not found (ENOENT)');
+        resolve({ ok: false, reason: 'enoent' });
+        return;
+      }
+      log('debug', 'invoke-claude-p: spawn threw synchronously', {
+        code: e.code,
+        message: e.message,
+      });
+      resolve({ ok: false, reason: 'nonzero' });
+      return;
     }
-    return { ok: true, rawOutput: typeof stdout === 'string' ? stdout : String(stdout) };
-  } catch (err) {
-    return categorize(err);
-  }
-}
 
-interface ExecFailure {
-  code?: number | string;
-  killed?: boolean;
-  signal?: NodeJS.Signals | null;
-  stderr?: string | Buffer;
-  message?: string;
-}
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let bufferExceeded = false;
+    let timedOut = false;
+    let settled = false;
 
-function categorize(err: unknown): ClaudeResult {
-  const e = (err ?? {}) as ExecFailure;
-  const stderr = typeof e.stderr === 'string' ? e.stderr : e.stderr?.toString('utf8') ?? '';
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, timeoutMs);
+    // Don't let our deadline keep the event loop alive beyond the child.
+    timeoutHandle.unref?.();
 
-  if (e.code === 'ENOENT') {
-    log('debug', 'invoke-claude-p: binary not found (ENOENT)');
-    return { ok: false, reason: 'enoent' };
-  }
+    const settle = (result: ClaudeResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      resolve(result);
+    };
 
-  // The timeout option kills with the default signal (SIGTERM) and sets
-  // `err.killed = true`. Externally delivered SIGTERM (e.g. parent
-  // orchestrator, `kill` from another tool) must NOT be classified as a
-  // timeout — execFile only sets `killed` when IT initiated the kill
-  // (timeout / maxBuffer). Without the killed=true guard the helper
-  // misreports foreign SIGTERMs (codex-review-2 finding 3).
-  if (e.signal === 'SIGTERM' && e.killed === true) {
-    log('debug', 'invoke-claude-p: timed out', {
-      timeout_signal: e.signal,
-      stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (bufferExceeded) return;
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > CLAUDE_P_MAX_BUFFER) {
+        bufferExceeded = true;
+        child.kill('SIGTERM');
+        return;
+      }
+      stdoutChunks.push(chunk);
     });
-    return { ok: false, reason: 'timeout' };
-  }
-  if (typeof e.signal === 'string' && e.signal.length > 0) {
-    log('debug', 'invoke-claude-p: killed by signal', {
-      signal: e.signal,
-      killed: e.killed === true,
-      stderr: stderr.length > 0 ? truncate(stderr) : undefined,
-    });
-    return { ok: false, reason: 'killed' };
-  }
 
-  if (typeof e.code === 'number' && e.code !== 0) {
-    log('debug', 'invoke-claude-p: nonzero exit', {
-      exit_code: e.code,
-      stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (bufferExceeded) return;
+      stderrBytes += chunk.length;
+      if (stderrBytes > CLAUDE_P_MAX_BUFFER) {
+        bufferExceeded = true;
+        child.kill('SIGTERM');
+        return;
+      }
+      stderrChunks.push(chunk);
     });
-    return { ok: false, reason: 'nonzero' };
-  }
 
-  // Fallback — shape didn't match any known category. Treat as nonzero so
-  // the hook falls through to the silent body rather than silently missing.
-  log('debug', 'invoke-claude-p: uncategorized failure', {
-    message: typeof e.message === 'string' ? e.message : String(err),
-    code: e.code,
-    signal: e.signal ?? null,
+    child.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') {
+        log('debug', 'invoke-claude-p: binary not found (ENOENT)');
+        settle({ ok: false, reason: 'enoent' });
+        return;
+      }
+      log('debug', 'invoke-claude-p: spawn error', {
+        code: err.code,
+        message: err.message,
+      });
+      settle({ ok: false, reason: 'nonzero' });
+    });
+
+    child.once('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+
+      if (timedOut) {
+        log('debug', 'invoke-claude-p: timed out', {
+          timeout_signal: signal,
+          stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+        });
+        settle({ ok: false, reason: 'timeout' });
+        return;
+      }
+
+      if (bufferExceeded) {
+        log('debug', 'invoke-claude-p: maxBuffer exceeded', {
+          signal,
+          stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+        });
+        settle({ ok: false, reason: 'nonzero' });
+        return;
+      }
+
+      if (signal !== null) {
+        log('debug', 'invoke-claude-p: killed by signal', {
+          signal,
+          killed: false,
+          stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+        });
+        settle({ ok: false, reason: 'killed' });
+        return;
+      }
+
+      if (code === 0) {
+        if (stderr.length > 0) {
+          log('debug', 'invoke-claude-p: stderr on zero exit', {
+            stderr: truncate(stderr),
+          });
+        }
+        settle({ ok: true, rawOutput: stdout });
+        return;
+      }
+
+      log('debug', 'invoke-claude-p: nonzero exit', {
+        exit_code: code,
+        stderr: stderr.length > 0 ? truncate(stderr) : undefined,
+      });
+      settle({ ok: false, reason: 'nonzero' });
+    });
   });
-  return { ok: false, reason: 'nonzero' };
 }
 
 function truncate(s: string): string {

@@ -93,6 +93,7 @@ These decisions are settled across Core Wave 2 and apply to all remaining ticket
 - **Shipping model:** Idle ships TypeScript sources. Hooks execute via `npx tsx`. No compiled `dist/` at runtime. Installed command format: `npx tsx /abs/path/src/hooks/<n>.ts # idle:v1`.
 - **Hook ownership:** Strict three-condition `isIdleOwnedCommand` predicate in `src/core/settings.ts`. No substring matching.
 - **Async hook flags:** SessionStart/PostToolUse/SessionEnd are `async: true`; Stop is sync.
+- **Hook timeouts (F-013):** Every installed hook carries an explicit `timeout` (seconds) in `settings.json` rather than inheriting Claude Code's default. Stop is 30s (covers `claude -p` + notification + overhead); the three async hooks are 10s each. Values are type-locked to the event name in `IdleHookEvent`.
 - **Never-throw primitives:** `log()` and `notify()` contractually never throw. Callers do not wrap.
 - **State access:** Use named helpers in `src/core/state.ts` (readState, registerSession, removeSession, takeSessionSnapshot, consumePendingCheckin, incrementToolCounter). Raw `_updateState` is module-private.
 - **Settings access:** Use `installHooks()` / `uninstallHooks()` from `src/core/settings.ts`. Both return discriminated-result types.
@@ -364,8 +365,8 @@ Reviewer approves the design, then implementation proceeds.
 
 This ticket composes several established primitives. The specific composition is:
 
-1. **Child process invocation:** Use `child_process.execFile('claude', ['-p', prompt], options)` — **NOT `spawn` or `exec`**. `execFile` prevents shell injection when the prompt contains shell metacharacters (which LLM-generated content can).
-2. **Auth inheritance:** The spawned `claude` process inherits the user's environment. Pass `env: process.env` explicitly and set `timeout: 8000` (8 seconds) in the `execFile` options. Reasoning: Stop is `async: false`, so the `execFile` timeout is the worst-case user-visible block before the next prompt starts. `claude -p` for a 30-word output typically resolves in 2–5 seconds; 8s leaves headroom, and timeout firings gracefully fall back to the silent-preset body so the user still gets a signal. (Earlier iterations of this ticket specified 15s; reduced to 8s via the T-010 design doc.)
+1. **Child process invocation:** Use `child_process.spawn('claude', ['-p', prompt], options)` with `stdio: ['ignore', 'pipe', 'pipe']` and **no shell** — **NOT `exec`, and NOT `spawn` with `shell: true`**. Argv passes directly to the child; LLM-generated metacharacters cannot escape because there is no shell. The `'ignore'` on stdin is load-bearing per F-012: `claude` blocks up to ~3s reading stdin before consuming the argv prompt, and an inherited pipe causes external SIGTERM (exit 143) before the hook can notify. (Earlier iterations of this ticket specified `execFile`; superseded by F-012.)
+2. **Auth inheritance:** The spawned `claude` process inherits the user's environment. Pass `env: process.env` explicitly and enforce an 8-second ceiling via `setTimeout` + `child.kill('SIGTERM')` (no native `timeout` option on `spawn`). Reasoning: Stop is `async: false`, so the internal timeout is the worst-case user-visible block before the next prompt starts. `claude -p` for a 30-word output typically resolves in 2–5 seconds; 8s leaves headroom, and timeout firings gracefully fall back to the silent-preset body so the user still gets a signal. (Earlier iterations of this ticket specified 15s; reduced to 8s via the T-010 design doc.)
 3. **State reset:** Use `consumePendingCheckin(sessionId)` from `src/core/state.ts`. This helper is atomic and race-safe. Do NOT manually read state, clear the `pending_checkin` flag, and write back — that reintroduces the race the helper was built to solve.
 4. **Notification:** Use `notify({ title, body, sound, method })` from `src/core/notify.ts`, forwarding `config.notifications.sound` and `config.notifications.method` on **every** call site (silent-preset success, LLM success, and every fallback). `notify()` is never-throw; do not wrap in try/catch. **Prerequisite:** `notify()` currently only accepts `sound`. Extending `NotifyInput` to accept `method` is a Core-owned change that must land before T-010 implementation starts; tracked in the T-010 design doc under "Prerequisites".
 5. **Prompt templates:** Load from `src/prompts/<tone>.ts` based on the configured tone preset. Each template exports a `buildPrompt(stats)` function (per T-012).
@@ -382,7 +383,7 @@ This ticket composes several established primitives. The specific composition is
 4. Load config. Select tone preset.
 5. Build prompt using `buildPrompt(stats)` from the selected template.
 6. If tone is `silent`: pass the template's output directly to `notify()`. Done.
-7. Otherwise: invoke `execFile('claude', ['-p', prompt], { env, timeout: 8000 })`. Capture stdout.
+7. Otherwise: invoke `spawn('claude', ['-p', prompt], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })` with an 8s ceiling enforced via `setTimeout` + `child.kill('SIGTERM')`. Capture stdout/stderr via `'data'` events.
 8. Normalize stdout (strip ANSI, trim, first non-empty line, cap at 200 chars). Pass to `notify({ title: 'Idle', body: normalizedOutput, sound, method })`, forwarding `config.notifications.sound` and `config.notifications.method`.
 9. On any **hard** failure in step 7 — timeout, ENOENT (binary not on PATH), or non-zero exit — fall back to the silent preset's output. Log the failure to debug. Pass fallback to `notify()` with the same sound/method. **Zero-exit with stderr content is NOT a hard failure**: log the stderr at debug, but use stdout as success. CLI tools commonly emit stderr during normal operation (deprecation warnings, info logs); treating any stderr as failure would cause near-universal fallback. An empty-after-normalize result also falls back to the silent body.
 10. Return (hook completes).
@@ -392,7 +393,7 @@ This ticket composes several established primitives. The specific composition is
 - Design doc posted before implementation and approved.
 - Stop hook is configured with `async: false` in settings.json (per established landmarks — it must complete before the session truly ends, so the notification appears at the right moment).
 - All state mutation goes through `consumePendingCheckin`. No raw state access.
-- `execFile` used (not `spawn`, not `exec`). 8-second timeout. Env inherited.
+- `spawn` used (not `exec`, no `shell: true`) with `stdio: ['ignore', 'pipe', 'pipe']`. 8-second internal ceiling via `setTimeout` + `child.kill`. Env inherited.
 - Silent preset short-circuits the LLM call.
 - Fallback path: `claude -p` hard failure (timeout, ENOENT, non-zero exit) triggers silent-preset output, logs to debug, still calls `notify()` with the configured sound/method so the user gets *some* signal. Zero-exit-with-stderr is NOT a hard failure; stdout is used, stderr is logged at debug.
 - `config.notifications.sound` and `config.notifications.method` are forwarded to every `notify()` call (prereq: `NotifyInput` extended in `src/core/notify.ts`).
@@ -403,7 +404,8 @@ This ticket composes several established primitives. The specific composition is
 
 #### What NOT to do
 
-- Do not use `spawn` or `exec`. Shell injection is a real risk with LLM-generated content.
+- Do not use `exec`, and do not pass `shell: true` to `spawn`. Argv passes directly to the child with no shell interpretation; either shell path re-opens shell injection from LLM-generated content.
+- Do not leave stdin as the default pipe. `claude -p` blocks up to ~3s on stdin; under Claude Code's ~5s hook timeout this causes external SIGTERM (F-012). Pin `stdio: ['ignore', 'pipe', 'pipe']`.
 - Do not manually manage `pending_checkin`. Use the helper.
 - Do not wrap `notify()` or `log()` in try/catch. They are never-throw.
 - Do not introduce a two-hook design (earlier PRD iterations referenced this; it is superseded).
@@ -738,3 +740,40 @@ tolerance in the affected tests, (b) use fake timers, (c)
 investigate whether _updateState's lock acquisition has a 
 genuine race with heavy concurrent callers. Resolve before 
 v1.1 release.
+
+### F-012 — Stop hook `claude -p` stdin inheritance caused external SIGTERM
+**Status:** Resolved by this PR
+**Origin:** T-020 Phase 5 integration verification
+**Description:** `invokeClaudeP` used `execFile`, which leaves the
+child's stdin as an open, never-closed pipe. The `claude` CLI blocks
+up to ~3s reading stdin before falling back to the argv prompt. Under
+Claude Code's ~5s hook timeout, this caused external SIGTERM (exit 143
+in `~/.idle/debug.log`) before the notification could fire — break
+suggestions never delivered in production use. Fixed by switching
+`execClaudeLike` from `execFile` to `spawn` with explicit
+`stdio: ['ignore', 'pipe', 'pipe']`, giving the child immediate EOF on
+stdin. Measured timing on reference macOS: 5.1s (inherited) → 3.9s
+(ignored), ~1.2s headroom inside the hook budget. The 8s timeout is
+now enforced internally via `setTimeout` + `child.kill('SIGTERM')`
+(no native `timeout` option on `spawn`). Argv-safety guarantee is
+preserved: `spawn` without `shell: true` passes argv directly with no
+shell interpretation, so LLM-generated prompts cannot inject.
+
+### F-013 — Claude Code hook timeout configuration
+**Status:** Resolved by this PR
+**Origin:** Noted during F-012 review (Codex review of
+`jkupaswe/stop-stdin-spawn`).
+**Description:** Claude Code's hook protocol supports a per-hook
+`timeout` field (seconds) at https://code.claude.com/docs/en/hooks.
+`installHooks()` previously did not set timeout values, inheriting
+Claude Code's default — F-012 symptoms (exit 143 external SIGTERM)
+suggest that default is ~5s, tight for Stop given `claude -p` latency.
+Fixed by extending `IdleHookEvent` with a `timeoutSeconds` field per
+event and writing it into every installed hook entry: Stop gets 30s
+(covers the ~11s worst-case per `docs/known-limitations.md` with
+comfortable headroom); SessionStart / PostToolUse / SessionEnd get 10s
+each (ample safety margin for state-mutation paths that should finish
+in &lt;500ms). The field is type-locked to the event name alongside
+`async` and `script`, so drift from the install-time values is a
+compile error. Defense-in-depth against future variants of the F-012
+class of bug.

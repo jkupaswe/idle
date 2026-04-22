@@ -35,27 +35,56 @@ export const IDLE_TAG = '# idle:v1';
 
 /**
  * Discriminated union over the four Claude Code events Idle registers for.
- * The `async` flag and the `script` filename are locked to the event name
- * at compile time — a string-typed "which hook is this" can't float around
- * out of sync.
+ * The `async` flag, `script` filename, and `timeoutSeconds` are locked to
+ * the event name at compile time — a string-typed "which hook is this"
+ * can't float around out of sync.
  *
  * `Stop` is the only synchronous hook: it runs `claude -p` and triggers the
  * notification, so Claude Code must block on it. The other three tick
  * counters / archive state and must never add latency to the tool-use
  * loop.
+ *
+ * Per-hook `timeoutSeconds` (F-013) pins an explicit ceiling into
+ * `settings.json` rather than inheriting Claude Code's default (~5s per
+ * F-012 evidence). Stop gets 30s because its worst-case budget is
+ * `claude -p` 8s + notification ~2s + overhead (see docs/known-limitations.md:
+ * ~11s cumulative) — 30s leaves ample headroom without being reckless. The
+ * three async hooks are short state-mutation paths that should finish in
+ * <500ms; 10s is an aggressive-but-not-tight safety net. Claude Code
+ * enforces the value in seconds.
  */
 export type IdleHookEvent =
-  | { readonly event: 'SessionStart'; readonly async: true; readonly script: 'session-start.ts' }
-  | { readonly event: 'PostToolUse'; readonly async: true; readonly script: 'post-tool-use.ts' }
-  | { readonly event: 'Stop'; readonly async: false; readonly script: 'stop.ts' }
-  | { readonly event: 'SessionEnd'; readonly async: true; readonly script: 'session-end.ts' };
+  | {
+      readonly event: 'SessionStart';
+      readonly async: true;
+      readonly script: 'session-start.ts';
+      readonly timeoutSeconds: 10;
+    }
+  | {
+      readonly event: 'PostToolUse';
+      readonly async: true;
+      readonly script: 'post-tool-use.ts';
+      readonly timeoutSeconds: 10;
+    }
+  | {
+      readonly event: 'Stop';
+      readonly async: false;
+      readonly script: 'stop.ts';
+      readonly timeoutSeconds: 30;
+    }
+  | {
+      readonly event: 'SessionEnd';
+      readonly async: true;
+      readonly script: 'session-end.ts';
+      readonly timeoutSeconds: 10;
+    };
 
 /** The four event records Idle installs, in settings.json insertion order. */
 export const IDLE_HOOK_EVENTS: readonly IdleHookEvent[] = [
-  { event: 'SessionStart', async: true, script: 'session-start.ts' },
-  { event: 'PostToolUse', async: true, script: 'post-tool-use.ts' },
-  { event: 'Stop', async: false, script: 'stop.ts' },
-  { event: 'SessionEnd', async: true, script: 'session-end.ts' },
+  { event: 'SessionStart', async: true, script: 'session-start.ts', timeoutSeconds: 10 },
+  { event: 'PostToolUse', async: true, script: 'post-tool-use.ts', timeoutSeconds: 10 },
+  { event: 'Stop', async: false, script: 'stop.ts', timeoutSeconds: 30 },
+  { event: 'SessionEnd', async: true, script: 'session-end.ts', timeoutSeconds: 10 },
 ] as const;
 
 /** Just the event names, for iteration / type-level work. */
@@ -363,11 +392,14 @@ export async function uninstallHooks(
  * Claude Code hook-command shape. `async: true` makes Claude Code fire the
  * handler in the background; omitting the field (or `false`) makes it
  * block on completion. Idle uses async for every event except Stop.
+ * `timeout` is Claude Code's per-hook ceiling in seconds (F-013); we set it
+ * explicitly rather than inheriting the default.
  */
 interface HookCommand {
   type: 'command';
   command: string;
   async?: boolean;
+  timeout?: number;
   [extra: string]: unknown;
 }
 
@@ -390,15 +422,18 @@ function addIdleHooks(
   for (const hook of IDLE_HOOK_EVENTS) {
     const groups = [...(hooks[hook.event] ?? [])];
     const idx = groups.findIndex((g) => g.matcher === '');
+    const command = buildHookCommand(hook.script, hooksDir);
     const idleCmd: HookCommand = hook.async
       ? {
           type: 'command',
-          command: buildHookCommand(hook.script, hooksDir),
+          command,
           async: true,
+          timeout: hook.timeoutSeconds,
         }
       : {
           type: 'command',
-          command: buildHookCommand(hook.script, hooksDir),
+          command,
+          timeout: hook.timeoutSeconds,
         };
     if (idx === -1) {
       groups.push({ matcher: '', hooks: [idleCmd] });
